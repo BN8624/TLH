@@ -210,6 +210,13 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
     retry_failure_count = 0
     fallback_after_retry_count = 0
     max_retry_attempts = 0
+    backoff_enabled = False
+    backoff_schedule: list[float] = []
+    jitter_enabled = False
+    retry_budget_enabled = False
+    retry_budget_limit = 0
+    retry_budget_exhausted_count = 0
+    key_slot_preserved = True
     for result in results:
         backend_mix[result.backend] = backend_mix.get(result.backend, 0) + 1
         requested = result.metadata.get("requested_backend")
@@ -218,6 +225,19 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
         if key_slot:
             assigned_key_slots.append(key_slot)
         max_retry_attempts = max(max_retry_attempts, _int_value(result.metadata.get("max_retry_attempts")))
+        if result.metadata.get("retry_backoff_enabled"):
+            backoff_enabled = True
+        if not backoff_schedule and isinstance(result.metadata.get("retry_backoff_schedule"), list):
+            backoff_schedule = result.metadata.get("retry_backoff_schedule", [])
+        if result.metadata.get("retry_jitter_enabled"):
+            jitter_enabled = True
+        if result.metadata.get("retry_budget_enabled"):
+            retry_budget_enabled = True
+        retry_budget_limit = max(retry_budget_limit, _int_value(result.metadata.get("retry_budget_limit")))
+        if result.metadata.get("retry_skipped_reason") == "retry budget exhausted":
+            retry_budget_exhausted_count += 1
+        if result.metadata.get("key_slot_preserved") is False:
+            key_slot_preserved = False
         retry_count = _int_value(result.metadata.get("retry_count"))
         first_error_type = str(result.metadata.get("first_error_type", "none"))
         if first_error_type in {"timeout", "api_503_high_demand", "api_500_internal", "api_429_rate_limit"}:
@@ -250,11 +270,19 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
         "retry_policy": {
             "enabled": max_retry_attempts > 0,
             "max_retry_attempts": max_retry_attempts,
+            "backoff_enabled": backoff_enabled,
+            "backoff_schedule": backoff_schedule,
+            "jitter_enabled": jitter_enabled,
+            "retry_budget_enabled": retry_budget_enabled,
+            "retry_budget_limit": retry_budget_limit,
             "retryable_error_count": retryable_error_count,
             "retried_worker_count": retried_worker_count,
             "retry_success_count": retry_success_count,
             "retry_failure_count": retry_failure_count,
             "fallback_after_retry_count": fallback_after_retry_count,
+            "retry_budget_exhausted_count": retry_budget_exhausted_count,
+            "successful_workers_rerun": False,
+            "key_slot_preserved": key_slot_preserved,
         },
         "fallback_used": any(result.fallback_used for result in results),
         "policy_routing_stub_count": policy_routing_stub_count,
@@ -282,11 +310,19 @@ def _routing_lines(routing: dict) -> list[str]:
         f"single-key mode: {routing.get('key_pool', {}).get('single_key_mode', True)}",
         f"retry policy enabled: {retry.get('enabled', False)}",
         f"max retry attempts: {retry.get('max_retry_attempts', 0)}",
+        f"retry backoff enabled: {retry.get('backoff_enabled', False)}",
+        f"retry backoff schedule: {_slot_list(retry.get('backoff_schedule', []))}",
+        f"retry jitter enabled: {retry.get('jitter_enabled', False)}",
+        f"retry budget enabled: {retry.get('retry_budget_enabled', False)}",
+        f"retry budget limit: {retry.get('retry_budget_limit', 0)}",
         f"retryable error count: {retry.get('retryable_error_count', 0)}",
         f"retried worker count: {retry.get('retried_worker_count', 0)}",
         f"retry success count: {retry.get('retry_success_count', 0)}",
         f"retry failure count: {retry.get('retry_failure_count', 0)}",
         f"fallback after retry count: {retry.get('fallback_after_retry_count', 0)}",
+        f"retry budget exhausted count: {retry.get('retry_budget_exhausted_count', 0)}",
+        f"successful workers rerun: {retry.get('successful_workers_rerun', False)}",
+        f"key slot preserved: {retry.get('key_slot_preserved', True)}",
     ]
 
 

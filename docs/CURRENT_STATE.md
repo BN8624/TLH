@@ -65,6 +65,7 @@ S-11 Controlled Live-11 One-Shot Trial completed with PASS quality: run_id `run-
 S-12 Controlled Live-22 Capacity Trial completed with PARTIAL quality: run_id `run-20260707-120538`, timeout 300s, limited_live live-limit 22, preflight live 22 / stub 0 / fallback 0, actual live 20 / stub 2 / fallback 2, available key slots 22, assigned key slots 1-22, distinct key slots used 22, single-key mode NO, fallback causes API 503 high demand and API 500 internal error, live-limit 22 is not promoted to baseline, raw artifacts ignored and not committed.
 S-13 Per-worker Telemetry + Targeted Retry Policy completed with PASS-candidate tests: WorkerResult metadata records worker_index, key_slot, final_backend, latency_ms, attempt_count, retry_count, fallback_cause, error_type, and safe error messages; targeted retry applies once to timeout, API 503 high demand, API 500 internal error, and API 429 rate limit only; successful workers are not rerun; retry preserves key_slot; API key values are not recorded; live-limit 22 remains a capacity trial result, not a baseline.
 S-14 Controlled Live-22 Retry Trial completed with PARTIAL quality: run_id `run-20260707-132504`, timeout 300s, limited_live live-limit 22, preflight live 22 / stub 0 / fallback 0, actual live 19 / stub 3 / fallback 3, available key slots 22, assigned key slots 1-22, distinct key slots used 22, single-key mode NO, retryable error count 5, retried worker count 5, retry success count 2, retry failure count 3, fallback after retry count 3, fallback causes API 503 high demand and API 500 internal error, baseline unchanged at live-limit 5 with timeout 300s, raw artifacts ignored and not committed.
+S-15 Retry Backoff / Jitter / Retry Budget Policy completed with PASS-candidate tests: max retry attempts increased from 1 to 2 for retryable transient errors; retryable errors remain timeout, API 503 high demand, API 500 internal error, and API 429 rate limit; auth, schema, and invalid model response errors are not retried; backoff defaults to 5s and 15s with small jitter; tests inject fake sleep and jitter; retry budget defaults to 5 retried workers per run; successful workers are not rerun; retry preserves key_slot; API key values are not recorded; live-limit 22 remains a capacity/retry trial result, not a baseline.
 
 The MVP currently proves the following flow with stub workers.
 
@@ -122,6 +123,7 @@ Stub fallback for missing or failed live configuration.
 Gemini key pool slot assignment for live workers.
 Per-worker live telemetry with latency, key_slot, backend, fallback, error, and retry metadata.
 Targeted retry policy for transient live worker failures.
+Retry backoff, jitter, and per-run retry budget policy for transient live worker failures.
 Mock live adapter tests.
 One-live-worker live dry run review.
 Multi-live limit dry run review.
@@ -180,7 +182,7 @@ The approved baseline is live-limit 5 with `TLH_GEMMA_TIMEOUT_SECONDS=300`.
 python -m tlh route-dry-run --workers 11 --mode limited_live --live-limit 5
 ```
 
-The next controlled scaling decision should review S-14 retry telemetry before any further live-limit 22 run, because targeted retry recovered some transient API failures but did not eliminate fallback at 22 workers.
+The next controlled scaling decision should use route-dry-run preflight and the S-15 backoff/jitter/budget policy before any further explicitly approved live-limit 22 run.
 
 ---
 
@@ -233,6 +235,7 @@ S-11 was a user-approved one-shot live-limit 11 trial and does not change the ap
 S-12 showed the full 22-slot key pool can be assigned distinctly, but live-limit 22 remains a one-shot capacity result and does not change the approved baseline from live-limit 5.
 S-13 adds targeted retry for transient API-side failures, but does not promote live-limit 22 or replace route-dry-run preflight.
 S-14 shows live-limit 22 is still transient-sensitive even with one targeted retry; do not promote live-limit 22 to baseline.
+S-15 improves retry resilience with two attempts, backoff, jitter, and a retry budget, but does not promote live-limit 22 to baseline.
 
 Later decisions.
 
@@ -271,7 +274,7 @@ MinimalityCheck notes
 ## Recommended Next Slice
 
 ```text
-Review S-14 retry telemetry and decide whether to add retry backoff/jitter, increase max retry attempts, reduce live-limit for capacity trials, or run another explicitly approved live-limit 22 trial.
+Run another explicitly approved live-limit 22 retry trial only after route-dry-run preflight, using the S-15 retry backoff, jitter, and budget policy.
 Keep API key values out of output, notes, logs, and commits.
 ```
 

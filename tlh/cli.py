@@ -505,11 +505,19 @@ def _routing_lines(packet: dict) -> list[str]:
         f"single-key mode: {key_pool.get('single_key_mode', True)}",
         f"retry policy enabled: {retry.get('enabled', False)}",
         f"max retry attempts: {retry.get('max_retry_attempts', 0)}",
+        f"retry backoff enabled: {retry.get('backoff_enabled', False)}",
+        f"retry backoff schedule: {_slot_list(retry.get('backoff_schedule', []))}",
+        f"retry jitter enabled: {retry.get('jitter_enabled', False)}",
+        f"retry budget enabled: {retry.get('retry_budget_enabled', False)}",
+        f"retry budget limit: {retry.get('retry_budget_limit', 0)}",
         f"retryable error count: {retry.get('retryable_error_count', 0)}",
         f"retried worker count: {retry.get('retried_worker_count', 0)}",
         f"retry success count: {retry.get('retry_success_count', 0)}",
         f"retry failure count: {retry.get('retry_failure_count', 0)}",
         f"fallback after retry count: {retry.get('fallback_after_retry_count', 0)}",
+        f"retry budget exhausted count: {retry.get('retry_budget_exhausted_count', 0)}",
+        f"successful workers rerun: {retry.get('successful_workers_rerun', False)}",
+        f"key slot preserved: {retry.get('key_slot_preserved', True)}",
     ]
 
 

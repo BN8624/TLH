@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import time
 from typing import Callable, Mapping
 
@@ -17,7 +18,11 @@ class WorkerBackendError(RuntimeError):
 
 
 GemmaGenerate = Callable[[str], gemma_client.GemmaResponse]
-DEFAULT_MAX_RETRY_ATTEMPTS = 1
+RetrySleep = Callable[[float], None]
+RetryJitter = Callable[[float, float], float]
+DEFAULT_MAX_RETRY_ATTEMPTS = 2
+DEFAULT_RETRY_BACKOFF_SCHEDULE = [5.0, 15.0]
+DEFAULT_RETRY_BUDGET_LIMIT = 5
 RETRYABLE_ERROR_TYPES = {"timeout", "api_503_high_demand", "api_500_internal", "api_429_rate_limit"}
 
 
@@ -26,6 +31,8 @@ def run_worker(
     env: Mapping[str, str] | None = None,
     live_generate: GemmaGenerate | None = None,
     routing_decision: LiveRoutingDecision | None = None,
+    retry_sleep: RetrySleep | None = None,
+    retry_jitter: RetryJitter | None = None,
 ) -> WorkerResult:
     env = env or os.environ
     mode = routing_decision.selected_backend if routing_decision else _backend_mode(card, env)
@@ -75,7 +82,14 @@ def run_worker(
         )
 
     prompt = gemma_client.build_worker_prompt(card)
-    response, telemetry = _run_live_with_retry(prompt, env, routing_decision, live_generate)
+    response, telemetry = _run_live_with_retry(
+        prompt,
+        env,
+        routing_decision,
+        live_generate,
+        retry_sleep=retry_sleep,
+        retry_jitter=retry_jitter,
+    )
     if response.success:
         return _normalize_live_result(card, response, env, routing_decision, telemetry=telemetry)
 
@@ -127,11 +141,20 @@ def _run_live_with_retry(
     env: Mapping[str, str],
     routing_decision: LiveRoutingDecision | None,
     live_generate: GemmaGenerate,
+    retry_sleep: RetrySleep | None = None,
+    retry_jitter: RetryJitter | None = None,
 ) -> tuple[gemma_client.GemmaResponse, dict]:
     started = time.monotonic()
     max_retries = _max_retry_attempts(env)
+    backoff_schedule = _retry_backoff_schedule(env, max_retries)
+    budget_limit = _retry_budget_limit(env)
+    budget_remaining = _retry_budget_remaining(env, budget_limit)
+    budget_consumed = False
+    sleep = retry_sleep or time.sleep
+    jitter = retry_jitter or random.uniform
     attempts: list[dict] = []
     first_error_type = "none"
+    last_error_type = "none"
     response = gemma_client.GemmaResponse(success=False, error="unknown live worker failure")
     for attempt_index in range(max_retries + 1):
         attempt_started = time.monotonic()
@@ -148,9 +171,15 @@ def _run_live_with_retry(
                 fallback_used=False,
                 fallback_cause="none",
                 first_error_type=first_error_type,
+                last_error_type=last_error_type,
                 final_error_type="none",
                 error_message="",
                 max_retries=max_retries,
+                backoff_schedule=backoff_schedule,
+                budget_limit=budget_limit,
+                budget_remaining=budget_remaining,
+                budget_consumed=budget_consumed,
+                retry_skipped_reason="",
             )
             return response, telemetry
 
@@ -158,8 +187,35 @@ def _run_live_with_retry(
         error_type = classify_error(safe_error)
         if first_error_type == "none":
             first_error_type = error_type
-        attempts.append(_attempt_metadata(attempt_index + 1, False, attempt_latency_ms, env, error_type, safe_error))
-        if attempt_index < max_retries and _retryable(error_type):
+        last_error_type = error_type
+        can_retry = attempt_index < max_retries and _retryable(error_type)
+        retry_skipped_reason = ""
+        delay_seconds = 0.0
+        if can_retry:
+            if budget_remaining <= 0 and not budget_consumed:
+                can_retry = False
+                retry_skipped_reason = "retry budget exhausted"
+            else:
+                if not budget_consumed:
+                    budget_consumed = True
+                    budget_remaining -= 1
+                delay_seconds = backoff_schedule[min(attempt_index, len(backoff_schedule) - 1)] if backoff_schedule else 0.0
+                jitter_seconds = _retry_jitter_seconds(env, jitter)
+                delay_seconds += jitter_seconds
+        attempts.append(
+            _attempt_metadata(
+                attempt_index + 1,
+                False,
+                attempt_latency_ms,
+                env,
+                error_type,
+                safe_error,
+                scheduled_retry_delay_seconds=delay_seconds if can_retry else 0.0,
+            )
+        )
+        if can_retry:
+            if delay_seconds > 0:
+                sleep(delay_seconds)
             continue
         telemetry = _finish_live_telemetry(
             env=env,
@@ -170,9 +226,15 @@ def _run_live_with_retry(
             fallback_used=True,
             fallback_cause=error_type,
             first_error_type=first_error_type,
+            last_error_type=last_error_type,
             final_error_type=error_type,
             error_message=safe_error,
             max_retries=max_retries,
+            backoff_schedule=backoff_schedule,
+            budget_limit=budget_limit,
+            budget_remaining=budget_remaining,
+            budget_consumed=budget_consumed,
+            retry_skipped_reason=retry_skipped_reason,
         )
         return response, telemetry
     return response, _telemetry_without_live_attempt(env, routing_decision, "stub", True, "unknown", "unknown")
@@ -210,6 +272,69 @@ def _max_retry_attempts(env: Mapping[str, str]) -> int:
         return max(0, int(env.get("TLH_GEMMA_MAX_RETRY_ATTEMPTS", DEFAULT_MAX_RETRY_ATTEMPTS)))
     except (TypeError, ValueError):
         return DEFAULT_MAX_RETRY_ATTEMPTS
+
+
+def _retry_backoff_schedule(env: Mapping[str, str], max_retries: int) -> list[float]:
+    raw = env.get("TLH_GEMMA_RETRY_BACKOFF_SECONDS", "")
+    values: list[float] = []
+    if raw.strip():
+        for item in raw.split(","):
+            try:
+                values.append(max(0.0, float(item.strip())))
+            except ValueError:
+                continue
+    if not values:
+        values = DEFAULT_RETRY_BACKOFF_SCHEDULE.copy()
+    if max_retries <= 0:
+        return []
+    while len(values) < max_retries:
+        values.append(values[-1])
+    return values[:max_retries]
+
+
+def _retry_jitter_enabled(env: Mapping[str, str]) -> bool:
+    raw = env.get("TLH_GEMMA_RETRY_JITTER_ENABLED")
+    if raw is None:
+        return True
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _retry_jitter_seconds(env: Mapping[str, str], jitter: RetryJitter) -> float:
+    if not _retry_jitter_enabled(env):
+        return 0.0
+    try:
+        max_jitter = max(0.0, float(env.get("TLH_GEMMA_RETRY_JITTER_MAX_SECONDS", "2")))
+    except ValueError:
+        max_jitter = 2.0
+    return max(0.0, float(jitter(0.0, max_jitter))) if max_jitter else 0.0
+
+
+def _retry_budget_enabled(env: Mapping[str, str]) -> bool:
+    raw = env.get("TLH_GEMMA_RETRY_BUDGET_ENABLED")
+    if raw is None:
+        return True
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _retry_budget_limit(env: Mapping[str, str]) -> int:
+    if not _retry_budget_enabled(env):
+        return DEFAULT_RETRY_BUDGET_LIMIT
+    try:
+        return max(0, int(env.get("TLH_GEMMA_RETRY_BUDGET_WORKERS", DEFAULT_RETRY_BUDGET_LIMIT)))
+    except (TypeError, ValueError):
+        return DEFAULT_RETRY_BUDGET_LIMIT
+
+
+def _retry_budget_remaining(env: Mapping[str, str], budget_limit: int) -> int:
+    if not _retry_budget_enabled(env):
+        return budget_limit
+    raw = env.get("TLH_GEMMA_RETRY_BUDGET_REMAINING")
+    if raw is None:
+        return budget_limit
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return budget_limit
 
 
 def _redact_error(error: str, env: Mapping[str, str]) -> str:
@@ -595,9 +720,15 @@ def _telemetry_without_live_attempt(
         fallback_used=fallback_used,
         fallback_cause=error_type if fallback_used else "none",
         first_error_type=error_type if fallback_used else "none",
+        last_error_type=error_type,
         final_error_type=error_type,
         error_message=error_message,
         max_retries=_max_retry_attempts(env),
+        backoff_schedule=_retry_backoff_schedule(env, _max_retry_attempts(env)),
+        budget_limit=_retry_budget_limit(env),
+        budget_remaining=_retry_budget_remaining(env, _retry_budget_limit(env)),
+        budget_consumed=False,
+        retry_skipped_reason="",
     )
 
 
@@ -611,12 +742,19 @@ def _finish_live_telemetry(
     fallback_used: bool,
     fallback_cause: str,
     first_error_type: str,
+    last_error_type: str,
     final_error_type: str,
     error_message: str,
     max_retries: int,
+    backoff_schedule: list[float],
+    budget_limit: int,
+    budget_remaining: int,
+    budget_consumed: bool,
+    retry_skipped_reason: str,
 ) -> dict:
     ended = time.monotonic()
     attempt_count = len(attempts)
+    retry_count = max(0, attempt_count - 1)
     return {
         "worker_index": routing_decision.worker_index if routing_decision else None,
         "requested_backend": routing_decision.requested_backend if routing_decision else _backend_mode_from_env(env),
@@ -629,15 +767,28 @@ def _finish_live_telemetry(
         "ended_monotonic": round(ended, 6),
         "latency_ms": _latency_ms(started, ended),
         "attempt_count": attempt_count,
-        "retry_count": max(0, attempt_count - 1),
+        "retry_count": retry_count,
         "attempts": attempts,
         "retry_policy_enabled": max_retries > 0,
         "max_retry_attempts": max_retries,
+        "retry_backoff_enabled": bool(backoff_schedule),
+        "retry_backoff_schedule": backoff_schedule,
+        "retry_jitter_enabled": _retry_jitter_enabled(env),
+        "retry_budget_enabled": _retry_budget_enabled(env),
+        "retry_budget_applied": _retry_budget_enabled(env),
+        "retry_budget_limit": budget_limit,
+        "retry_budget_remaining": budget_remaining,
+        "retry_budget_consumed": budget_consumed,
+        "retry_skipped_reason": retry_skipped_reason,
+        "successful_workers_rerun": False,
+        "key_slot_preserved": _key_slot_preserved(attempts),
         "fallback_used": fallback_used,
         "fallback_cause": fallback_cause,
         "first_error_type": first_error_type,
+        "last_error_type": last_error_type,
         "final_error_type": final_error_type,
         "error_type": final_error_type,
+        "fallback_after_retry": fallback_used and retry_count > 0,
         "error_message_safe": _safe_error_message(error_message, env),
     }
 
@@ -649,6 +800,7 @@ def _attempt_metadata(
     env: Mapping[str, str],
     error_type: str,
     error_message: str,
+    scheduled_retry_delay_seconds: float = 0.0,
 ) -> dict:
     return {
         "attempt": attempt_number,
@@ -657,8 +809,14 @@ def _attempt_metadata(
         "latency_ms": latency_ms,
         "error_type": error_type,
         "error_message_safe": _safe_error_message(error_message, env),
+        "scheduled_retry_delay_seconds": scheduled_retry_delay_seconds,
     }
 
 
 def _latency_ms(started: float, ended: float) -> int:
     return max(0, int((ended - started) * 1000))
+
+
+def _key_slot_preserved(attempts: list[dict]) -> bool:
+    slots = {attempt.get("key_slot") for attempt in attempts if attempt.get("key_slot") is not None}
+    return len(slots) <= 1

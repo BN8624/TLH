@@ -19,9 +19,13 @@ def dispatch(root: Path, run_id: str, card_rows: list[dict]) -> list[WorkerResul
     policy = build_live_routing_policy(os.environ)
     key_slots = collect_gemini_key_slots(os.environ, root / ".env")
     live_count = 0
+    retry_budget_limit = _retry_budget_limit(os.environ)
+    retry_budget_remaining = retry_budget_limit
     for worker_index, card in enumerate(cards):
         card_env = os.environ.copy()
         card_env["TLH_GEMMA_KEY_POOL_AVAILABLE_SLOTS"] = str(len(key_slots))
+        card_env["TLH_GEMMA_RETRY_BUDGET_WORKERS"] = str(retry_budget_limit)
+        card_env["TLH_GEMMA_RETRY_BUDGET_REMAINING"] = str(retry_budget_remaining)
         requested = requested_backend(card, card_env)
         decision = decide_worker_backend(
             worker_index=worker_index,
@@ -40,7 +44,10 @@ def dispatch(root: Path, run_id: str, card_rows: list[dict]) -> list[WorkerResul
                 card_env["TLH_GEMMA_KEY_POOL_MODE"] = "pooled"
             else:
                 card_env["TLH_GEMMA_KEY_POOL_MODE"] = "single_key" if card_env.get("TLH_GEMMA_API_KEY") else "unavailable"
-        results.append(run_worker(card, env=card_env, routing_decision=decision))
+        result = run_worker(card, env=card_env, routing_decision=decision)
+        if result.metadata.get("retry_budget_consumed"):
+            retry_budget_remaining = max(0, retry_budget_remaining - 1)
+        results.append(result)
     write_jsonl(root / "machine" / "runs" / run_id / "worker_results.jsonl", [result.to_dict() for result in results])
     for result in results:
         result_id = f"{result.task_id}-result"
@@ -62,3 +69,10 @@ def dispatch(root: Path, run_id: str, card_rows: list[dict]) -> list[WorkerResul
 
 def _metadata_lines(result: WorkerResult) -> list[str]:
     return [f"{key}: {value}" for key, value in result.metadata.items()]
+
+
+def _retry_budget_limit(env) -> int:
+    try:
+        return max(0, int(env.get("TLH_GEMMA_RETRY_BUDGET_WORKERS", "5")))
+    except (TypeError, ValueError):
+        return 5

@@ -51,6 +51,8 @@ def env(key_slot: int = 1) -> dict[str, str]:
         "TLH_GEMMA_KEY_POOL_MODE": "pooled",
         "TLH_GEMMA_KEY_POOL_AVAILABLE_SLOTS": "22",
         "TLH_GEMMA_MAX_RETRY_ATTEMPTS": "1",
+        "TLH_GEMMA_RETRY_BACKOFF_SECONDS": "0",
+        "TLH_GEMMA_RETRY_JITTER_ENABLED": "false",
     }
 
 
