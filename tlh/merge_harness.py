@@ -204,15 +204,32 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
     first_metadata = results[0].metadata if results else {}
     assigned_key_slots: list[int] = []
     available_key_slots = 0
+    retryable_error_count = 0
+    retried_worker_count = 0
+    retry_success_count = 0
+    retry_failure_count = 0
+    fallback_after_retry_count = 0
+    max_retry_attempts = 0
     for result in results:
         backend_mix[result.backend] = backend_mix.get(result.backend, 0) + 1
         requested = result.metadata.get("requested_backend")
-        selected = result.metadata.get("selected_backend", result.backend)
         available_key_slots = max(available_key_slots, _int_value(result.metadata.get("available_key_slots")))
         key_slot = _int_value(result.metadata.get("key_slot"))
         if key_slot:
             assigned_key_slots.append(key_slot)
-        if selected == "stub" and requested in {"live", "auto"}:
+        max_retry_attempts = max(max_retry_attempts, _int_value(result.metadata.get("max_retry_attempts")))
+        retry_count = _int_value(result.metadata.get("retry_count"))
+        first_error_type = str(result.metadata.get("first_error_type", "none"))
+        if first_error_type in {"timeout", "api_503_high_demand", "api_500_internal", "api_429_rate_limit"}:
+            retryable_error_count += 1
+        if retry_count:
+            retried_worker_count += 1
+            if result.backend == "live" and not result.fallback_used:
+                retry_success_count += 1
+            if result.fallback_used:
+                retry_failure_count += 1
+                fallback_after_retry_count += 1
+        if result.backend == "stub" and requested in {"live", "auto"}:
             if result.fallback_used:
                 fallback_stub_count += 1
             else:
@@ -230,6 +247,15 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
             and "TLH_ALLOW_FULL_LIVE" in str(first_metadata.get("policy_source", "")),
         },
         "key_pool": _key_pool_summary(available_key_slots, assigned_key_slots),
+        "retry_policy": {
+            "enabled": max_retry_attempts > 0,
+            "max_retry_attempts": max_retry_attempts,
+            "retryable_error_count": retryable_error_count,
+            "retried_worker_count": retried_worker_count,
+            "retry_success_count": retry_success_count,
+            "retry_failure_count": retry_failure_count,
+            "fallback_after_retry_count": fallback_after_retry_count,
+        },
         "fallback_used": any(result.fallback_used for result in results),
         "policy_routing_stub_count": policy_routing_stub_count,
         "fallback_stub_count": fallback_stub_count,
@@ -239,6 +265,7 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
 def _routing_lines(routing: dict) -> list[str]:
     policy = routing.get("routing_policy", {})
     mix = routing.get("backend_mix", {})
+    retry = routing.get("retry_policy", {})
     return [
         f"policy mode: {policy.get('mode', 'unknown')}",
         f"max live workers: {policy.get('max_live_workers', 'unknown')}",
@@ -253,6 +280,13 @@ def _routing_lines(routing: dict) -> list[str]:
         f"assigned key slots: {_slot_list(routing.get('key_pool', {}).get('assigned_key_slots', []))}",
         f"distinct key slots used: {routing.get('key_pool', {}).get('distinct_key_slots_used', 0)}",
         f"single-key mode: {routing.get('key_pool', {}).get('single_key_mode', True)}",
+        f"retry policy enabled: {retry.get('enabled', False)}",
+        f"max retry attempts: {retry.get('max_retry_attempts', 0)}",
+        f"retryable error count: {retry.get('retryable_error_count', 0)}",
+        f"retried worker count: {retry.get('retried_worker_count', 0)}",
+        f"retry success count: {retry.get('retry_success_count', 0)}",
+        f"retry failure count: {retry.get('retry_failure_count', 0)}",
+        f"fallback after retry count: {retry.get('fallback_after_retry_count', 0)}",
     ]
 
 

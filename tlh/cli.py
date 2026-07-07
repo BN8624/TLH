@@ -492,6 +492,7 @@ def _routing_lines(packet: dict) -> list[str]:
     routing = packet.get("minimality", {}).get("routing", {})
     mix = routing.get("backend_mix", {})
     key_pool = routing.get("key_pool", {})
+    retry = routing.get("retry_policy", {})
     return [
         f"live WorkerResults: {mix.get('live', 0)}",
         f"stub WorkerResults: {mix.get('stub', 0)}",
@@ -502,6 +503,13 @@ def _routing_lines(packet: dict) -> list[str]:
         f"assigned key slots: {_slot_list(key_pool.get('assigned_key_slots', []))}",
         f"distinct key slots used: {key_pool.get('distinct_key_slots_used', 0)}",
         f"single-key mode: {key_pool.get('single_key_mode', True)}",
+        f"retry policy enabled: {retry.get('enabled', False)}",
+        f"max retry attempts: {retry.get('max_retry_attempts', 0)}",
+        f"retryable error count: {retry.get('retryable_error_count', 0)}",
+        f"retried worker count: {retry.get('retried_worker_count', 0)}",
+        f"retry success count: {retry.get('retry_success_count', 0)}",
+        f"retry failure count: {retry.get('retry_failure_count', 0)}",
+        f"fallback after retry count: {retry.get('fallback_after_retry_count', 0)}",
     ]
 
 

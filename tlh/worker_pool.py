@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Callable, Mapping
 
 from . import gemma_client
@@ -16,6 +17,8 @@ class WorkerBackendError(RuntimeError):
 
 
 GemmaGenerate = Callable[[str], gemma_client.GemmaResponse]
+DEFAULT_MAX_RETRY_ATTEMPTS = 1
+RETRYABLE_ERROR_TYPES = {"timeout", "api_503_high_demand", "api_500_internal", "api_429_rate_limit"}
 
 
 def run_worker(
@@ -30,9 +33,18 @@ def run_worker(
         live_generate = _generate_with_env(env)
 
     if mode == "stub":
-        return _stub_result(card, backend="stub", env=env, routing_decision=routing_decision)
+        telemetry = _telemetry_without_live_attempt(env, routing_decision, final_backend="stub", fallback_used=False)
+        return _stub_result(card, backend="stub", env=env, routing_decision=routing_decision, telemetry=telemetry)
 
     if mode == "auto" and not gemma_client.is_configured(env):
+        telemetry = _telemetry_without_live_attempt(
+            env,
+            routing_decision,
+            final_backend="stub",
+            fallback_used=True,
+            error_type="api_auth_error",
+            error_message="Live Gemma is not configured; auto used stub.",
+        )
         return _stub_result(
             card,
             backend="stub",
@@ -40,9 +52,18 @@ def run_worker(
             error="Live Gemma is not configured; auto used stub.",
             env=env,
             routing_decision=routing_decision,
+            telemetry=telemetry,
         )
 
     if mode not in {"live", "auto"}:
+        telemetry = _telemetry_without_live_attempt(
+            env,
+            routing_decision,
+            final_backend="stub",
+            fallback_used=True,
+            error_type="unknown",
+            error_message=f"Unsupported backend `{mode}`; used stub.",
+        )
         return _stub_result(
             card,
             backend="stub",
@@ -50,17 +71,26 @@ def run_worker(
             error=f"Unsupported backend `{mode}`; used stub.",
             env=env,
             routing_decision=routing_decision,
+            telemetry=telemetry,
         )
 
     prompt = gemma_client.build_worker_prompt(card)
-    response = live_generate(prompt)
+    response, telemetry = _run_live_with_retry(prompt, env, routing_decision, live_generate)
     if response.success:
-        return _normalize_live_result(card, response, env, routing_decision)
+        return _normalize_live_result(card, response, env, routing_decision, telemetry=telemetry)
 
-    error = _redact_error(response.error, env)
+    error = telemetry.get("error_message_safe") or _redact_error(response.error, env)
     fallback = routing_decision.fallback_allowed if routing_decision else _fallback_enabled(env, default=(mode == "auto"))
     if fallback:
-        return _stub_result(card, backend="stub", fallback_used=True, error=error, env=env, routing_decision=routing_decision)
+        return _stub_result(
+            card,
+            backend="stub",
+            fallback_used=True,
+            error=str(error),
+            env=env,
+            routing_decision=routing_decision,
+            telemetry=telemetry,
+        )
     raise WorkerBackendError(error or "Live Gemma worker failed.")
 
 
@@ -92,6 +122,96 @@ def _fallback_enabled(env: Mapping[str, str], default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _run_live_with_retry(
+    prompt: str,
+    env: Mapping[str, str],
+    routing_decision: LiveRoutingDecision | None,
+    live_generate: GemmaGenerate,
+) -> tuple[gemma_client.GemmaResponse, dict]:
+    started = time.monotonic()
+    max_retries = _max_retry_attempts(env)
+    attempts: list[dict] = []
+    first_error_type = "none"
+    response = gemma_client.GemmaResponse(success=False, error="unknown live worker failure")
+    for attempt_index in range(max_retries + 1):
+        attempt_started = time.monotonic()
+        response = live_generate(prompt)
+        attempt_latency_ms = _latency_ms(attempt_started, time.monotonic())
+        if response.success:
+            attempts.append(_attempt_metadata(attempt_index + 1, True, attempt_latency_ms, env, "none", ""))
+            telemetry = _finish_live_telemetry(
+                env=env,
+                routing_decision=routing_decision,
+                started=started,
+                attempts=attempts,
+                final_backend="live",
+                fallback_used=False,
+                fallback_cause="none",
+                first_error_type=first_error_type,
+                final_error_type="none",
+                error_message="",
+                max_retries=max_retries,
+            )
+            return response, telemetry
+
+        safe_error = _safe_error_message(response.error, env)
+        error_type = classify_error(safe_error)
+        if first_error_type == "none":
+            first_error_type = error_type
+        attempts.append(_attempt_metadata(attempt_index + 1, False, attempt_latency_ms, env, error_type, safe_error))
+        if attempt_index < max_retries and _retryable(error_type):
+            continue
+        telemetry = _finish_live_telemetry(
+            env=env,
+            routing_decision=routing_decision,
+            started=started,
+            attempts=attempts,
+            final_backend="stub",
+            fallback_used=True,
+            fallback_cause=error_type,
+            first_error_type=first_error_type,
+            final_error_type=error_type,
+            error_message=safe_error,
+            max_retries=max_retries,
+        )
+        return response, telemetry
+    return response, _telemetry_without_live_attempt(env, routing_decision, "stub", True, "unknown", "unknown")
+
+
+def classify_error(error: str) -> str:
+    lowered = error.lower()
+    if "timeout" in lowered or "timed out" in lowered:
+        return "timeout"
+    if "503" in lowered and ("high demand" in lowered or "unavailable" in lowered):
+        return "api_503_high_demand"
+    if "500" in lowered and ("internal" in lowered or "internal error" in lowered):
+        return "api_500_internal"
+    if "429" in lowered or "quota" in lowered or "rate limit" in lowered or "rate_limit" in lowered:
+        return "api_429_rate_limit"
+    if "auth" in lowered or "api key" in lowered or "permission" in lowered or "unauthorized" in lowered:
+        return "api_auth_error"
+    if "schema" in lowered or "validation" in lowered:
+        return "schema_error"
+    if "invalid model response" in lowered or "invalid response" in lowered or "parse" in lowered:
+        return "invalid_model_response"
+    if "api" in lowered or "unavailable" in lowered or "internal" in lowered:
+        return "unknown_api_error"
+    if not lowered.strip():
+        return "unknown"
+    return "unknown"
+
+
+def _retryable(error_type: str) -> bool:
+    return error_type in RETRYABLE_ERROR_TYPES
+
+
+def _max_retry_attempts(env: Mapping[str, str]) -> int:
+    try:
+        return max(0, int(env.get("TLH_GEMMA_MAX_RETRY_ATTEMPTS", DEFAULT_MAX_RETRY_ATTEMPTS)))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_RETRY_ATTEMPTS
+
+
 def _redact_error(error: str, env: Mapping[str, str]) -> str:
     api_key = env.get("TLH_GEMMA_API_KEY", "")
     if api_key:
@@ -99,11 +219,18 @@ def _redact_error(error: str, env: Mapping[str, str]) -> str:
     return error
 
 
+def _safe_error_message(error: str, env: Mapping[str, str]) -> str:
+    redacted = _redact_error(error or "", env)
+    redacted = " ".join(redacted.split())
+    return redacted[:240]
+
+
 def _normalize_live_result(
     card: TaskCard,
     response: gemma_client.GemmaResponse,
     env: Mapping[str, str],
     routing_decision: LiveRoutingDecision | None,
+    telemetry: dict | None = None,
 ) -> WorkerResult:
     data = _parse_live_text(response.text)
     missing: list[str] = []
@@ -144,7 +271,13 @@ def _normalize_live_result(
         model=response.model,
         fallback_used=False,
         error="",
-        metadata=_worker_metadata(env, backend="live", fallback_used=False, routing_decision=routing_decision),
+        metadata=_worker_metadata(
+            env,
+            backend="live",
+            fallback_used=False,
+            routing_decision=routing_decision,
+            telemetry=telemetry,
+        ),
     )
 
 
@@ -239,6 +372,7 @@ def _stub_result(
     error: str = "",
     env: Mapping[str, str] | None = None,
     routing_decision: LiveRoutingDecision | None = None,
+    telemetry: dict | None = None,
 ) -> WorkerResult:
     if card.merge_key == "s2_scope":
         findings = [
@@ -367,8 +501,14 @@ def _stub_result(
         backend=backend,
         model="",
         fallback_used=fallback_used,
-        error=error,
-        metadata=_worker_metadata(env, backend=backend, fallback_used=fallback_used, routing_decision=routing_decision),
+        error=_safe_error_message(error, env or {}),
+        metadata=_worker_metadata(
+            env,
+            backend=backend,
+            fallback_used=fallback_used,
+            routing_decision=routing_decision,
+            telemetry=telemetry,
+        ),
     )
 
 
@@ -377,7 +517,8 @@ def _worker_metadata(
     backend: str,
     fallback_used: bool,
     routing_decision: LiveRoutingDecision | None,
-) -> dict[str, int | str | bool | None]:
+    telemetry: dict | None = None,
+) -> dict:
     env = env or {}
     if routing_decision:
         metadata = routing_decision.to_metadata()
@@ -385,11 +526,13 @@ def _worker_metadata(
         metadata["selected_backend"] = backend
         metadata["fallback_used"] = fallback_used
         _attach_key_pool_metadata(metadata, env, backend)
+        if telemetry:
+            metadata.update(telemetry)
         if fallback_used:
             metadata["routing_reason"] = f"live call failed; stub fallback used: {metadata['routing_reason']}"
         return metadata
 
-    metadata: dict[str, int | str | bool | None] = {
+    metadata: dict = {
         "backend": backend,
         "requested_backend": _backend_mode_from_env(env),
         "selected_backend": backend,
@@ -406,6 +549,8 @@ def _worker_metadata(
     if backend == "live" and env.get("TLH_LIVE_WORKER_INDEX"):
         metadata["live_worker_index"] = _int_metadata(env.get("TLH_LIVE_WORKER_INDEX", "0"))
     _attach_key_pool_metadata(metadata, env, backend)
+    if telemetry:
+        metadata.update(telemetry)
     return metadata
 
 
@@ -430,3 +575,90 @@ def _attach_key_pool_metadata(metadata: dict[str, int | str | bool | None], env:
         metadata["single_key_mode"] = mode == "single_key"
     if env.get("TLH_GEMMA_KEY_SLOT"):
         metadata["key_slot"] = _int_metadata(env.get("TLH_GEMMA_KEY_SLOT", "0"))
+
+
+def _telemetry_without_live_attempt(
+    env: Mapping[str, str],
+    routing_decision: LiveRoutingDecision | None,
+    final_backend: str,
+    fallback_used: bool,
+    error_type: str = "none",
+    error_message: str = "",
+) -> dict:
+    started = time.monotonic()
+    return _finish_live_telemetry(
+        env=env,
+        routing_decision=routing_decision,
+        started=started,
+        attempts=[],
+        final_backend=final_backend,
+        fallback_used=fallback_used,
+        fallback_cause=error_type if fallback_used else "none",
+        first_error_type=error_type if fallback_used else "none",
+        final_error_type=error_type,
+        error_message=error_message,
+        max_retries=_max_retry_attempts(env),
+    )
+
+
+def _finish_live_telemetry(
+    *,
+    env: Mapping[str, str],
+    routing_decision: LiveRoutingDecision | None,
+    started: float,
+    attempts: list[dict],
+    final_backend: str,
+    fallback_used: bool,
+    fallback_cause: str,
+    first_error_type: str,
+    final_error_type: str,
+    error_message: str,
+    max_retries: int,
+) -> dict:
+    ended = time.monotonic()
+    attempt_count = len(attempts)
+    return {
+        "worker_index": routing_decision.worker_index if routing_decision else None,
+        "requested_backend": routing_decision.requested_backend if routing_decision else _backend_mode_from_env(env),
+        "selected_backend": routing_decision.selected_backend if routing_decision else _backend_mode_from_env(env),
+        "final_backend": final_backend,
+        "key_slot": _int_metadata(env.get("TLH_GEMMA_KEY_SLOT", "0")) or None,
+        "policy_mode": routing_decision.policy_mode if routing_decision else "legacy",
+        "live_limit": routing_decision.max_live_workers if routing_decision else _int_metadata(env.get("TLH_LIVE_WORKER_LIMIT", "0")),
+        "started_monotonic": round(started, 6),
+        "ended_monotonic": round(ended, 6),
+        "latency_ms": _latency_ms(started, ended),
+        "attempt_count": attempt_count,
+        "retry_count": max(0, attempt_count - 1),
+        "attempts": attempts,
+        "retry_policy_enabled": max_retries > 0,
+        "max_retry_attempts": max_retries,
+        "fallback_used": fallback_used,
+        "fallback_cause": fallback_cause,
+        "first_error_type": first_error_type,
+        "final_error_type": final_error_type,
+        "error_type": final_error_type,
+        "error_message_safe": _safe_error_message(error_message, env),
+    }
+
+
+def _attempt_metadata(
+    attempt_number: int,
+    success: bool,
+    latency_ms: int,
+    env: Mapping[str, str],
+    error_type: str,
+    error_message: str,
+) -> dict:
+    return {
+        "attempt": attempt_number,
+        "success": success,
+        "key_slot": _int_metadata(env.get("TLH_GEMMA_KEY_SLOT", "0")) or None,
+        "latency_ms": latency_ms,
+        "error_type": error_type,
+        "error_message_safe": _safe_error_message(error_message, env),
+    }
+
+
+def _latency_ms(started: float, ended: float) -> int:
+    return max(0, int((ended - started) * 1000))
