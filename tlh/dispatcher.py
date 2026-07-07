@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from .key_pool import assign_key_slot_for_live_worker, collect_gemini_key_slots
 from .live_routing import build_live_routing_policy, decide_worker_backend, requested_backend
 from .packet_writer import frontmatter_note, markdown_list, write_jsonl, write_text
 from .schemas import TaskCard, WorkerResult, from_dict
@@ -16,9 +17,11 @@ def dispatch(root: Path, run_id: str, card_rows: list[dict]) -> list[WorkerResul
     cards = [from_dict(TaskCard, row) for row in card_rows]
     results: list[WorkerResult] = []
     policy = build_live_routing_policy(os.environ)
+    key_slots = collect_gemini_key_slots(os.environ, root / ".env")
     live_count = 0
     for worker_index, card in enumerate(cards):
         card_env = os.environ.copy()
+        card_env["TLH_GEMMA_KEY_POOL_AVAILABLE_SLOTS"] = str(len(key_slots))
         requested = requested_backend(card, card_env)
         decision = decide_worker_backend(
             worker_index=worker_index,
@@ -30,6 +33,13 @@ def dispatch(root: Path, run_id: str, card_rows: list[dict]) -> list[WorkerResul
         card_env["TLH_WORKER_BACKEND"] = decision.selected_backend
         if decision.selected_backend == "live":
             live_count += 1
+            key_slot = assign_key_slot_for_live_worker(live_count, key_slots)
+            if key_slot is not None:
+                card_env["TLH_GEMMA_API_KEY"] = key_slots[key_slot]
+                card_env["TLH_GEMMA_KEY_SLOT"] = str(key_slot)
+                card_env["TLH_GEMMA_KEY_POOL_MODE"] = "pooled"
+            else:
+                card_env["TLH_GEMMA_KEY_POOL_MODE"] = "single_key" if card_env.get("TLH_GEMMA_API_KEY") else "unavailable"
         results.append(run_worker(card, env=card_env, routing_decision=decision))
     write_jsonl(root / "machine" / "runs" / run_id / "worker_results.jsonl", [result.to_dict() for result in results])
     for result in results:

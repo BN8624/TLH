@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import dispatcher, graph_index, merge_harness, team_lead
+from .key_pool import assign_key_slot_for_live_worker, collect_gemini_key_slots, safe_key_pool_summary
 from .live_routing import simulate_routing_decisions
 from .loop_controller import decide
 from .packet_writer import frontmatter_note, markdown_list, read_json, read_jsonl, read_text, write_json, write_text
@@ -82,8 +83,11 @@ def _route_dry_run(args) -> int:
         env["TLH_ALLOW_FULL_LIVE_SOURCE"] = "cli:--allow-full-live"
     if "TLH_WORKER_BACKEND" not in env:
         env["TLH_WORKER_BACKEND"] = "auto"
+    key_slots = collect_gemini_key_slots(env, Path.cwd() / ".env")
+    env["TLH_GEMMA_KEY_POOL_AVAILABLE_SLOTS"] = str(len(key_slots))
     simulation = simulate_routing_decisions(args.workers, env, requested="live")
     payload = simulation.to_dict()
+    payload["key_pool"] = _route_key_pool_summary(payload, key_slots)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
@@ -117,6 +121,13 @@ def _route_dry_run_text(payload: dict, force_backend: str | None) -> str:
         f"- force_live_implies_full_live: {_yes_no(guards['force_live_implied_full_live'])}",
         f"- full_live_requires_explicit_opt_in: {_yes_no(guards['full_live_requires_explicit_opt_in'])}",
         "",
+        "key_pool:",
+        f"- available key slots: {payload.get('key_pool', {}).get('available_key_slots', 0)}",
+        f"- assigned key slots: {_slot_list(payload.get('key_pool', {}).get('assigned_key_slots', []))}",
+        f"- distinct key slots used: {payload.get('key_pool', {}).get('distinct_key_slots_used', 0)}",
+        f"- single-key mode: {_yes_no(payload.get('key_pool', {}).get('single_key_mode', True))}",
+        f"- key values printed: {_yes_no(False)}",
+        "",
         "decisions:",
     ]
     lines.extend(
@@ -129,6 +140,20 @@ def _route_dry_run_text(payload: dict, force_backend: str | None) -> str:
 
 def _yes_no(value: bool) -> str:
     return "YES" if value else "NO"
+
+
+def _route_key_pool_summary(payload: dict, key_slots: dict[int, str]) -> dict:
+    assigned = []
+    live_count = sum(1 for decision in payload.get("decisions", []) if decision.get("selected_backend") == "live")
+    for live_worker_index in range(1, live_count + 1):
+        key_slot = assign_key_slot_for_live_worker(live_worker_index, key_slots)
+        if key_slot is not None:
+            assigned.append(key_slot)
+    return safe_key_pool_summary(len(key_slots), assigned)
+
+
+def _slot_list(slots) -> str:
+    return ",".join(str(slot) for slot in slots) if slots else "none"
 
 
 def _new_run_id() -> str:
@@ -466,12 +491,17 @@ def _packet_sections(packet: dict) -> dict[str, list[str]]:
 def _routing_lines(packet: dict) -> list[str]:
     routing = packet.get("minimality", {}).get("routing", {})
     mix = routing.get("backend_mix", {})
+    key_pool = routing.get("key_pool", {})
     return [
         f"live WorkerResults: {mix.get('live', 0)}",
         f"stub WorkerResults: {mix.get('stub', 0)}",
         f"policy routing stub count: {routing.get('policy_routing_stub_count', 0)}",
         f"fallback stub count: {routing.get('fallback_stub_count', 0)}",
         f"fallback used: {routing.get('fallback_used', False)}",
+        f"available key slots: {key_pool.get('available_key_slots', 0)}",
+        f"assigned key slots: {_slot_list(key_pool.get('assigned_key_slots', []))}",
+        f"distinct key slots used: {key_pool.get('distinct_key_slots_used', 0)}",
+        f"single-key mode: {key_pool.get('single_key_mode', True)}",
     ]
 
 

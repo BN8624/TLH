@@ -118,6 +118,32 @@ def test_mock_live_response_normalizes_to_worker_result() -> None:
     assert "SECRET_VALUE" not in json.dumps(result.to_dict())
 
 
+def test_default_live_generator_uses_worker_env(monkeypatch) -> None:
+    response_text = json.dumps(
+        {
+            "summary": "Live summary.",
+            "findings": ["scope: Use worker env key."],
+            "risks": [],
+            "assumptions": [],
+            "open_questions": [],
+            "attach_notes": ["target: FinalPacket.Scope | content: Use worker env key."],
+        }
+    )
+
+    def fake_generate(_prompt: str, config=None, client_factory=None) -> gemma_client.GemmaResponse:
+        assert config is not None
+        assert config.api_key == "SECRET_VALUE"
+        return gemma_client.GemmaResponse(success=True, text=response_text, model="mock-gemma")
+
+    monkeypatch.setattr(gemma_client, "generate", fake_generate)
+
+    result = run_worker(task_card(), env={"TLH_WORKER_BACKEND": "live", "TLH_GEMMA_API_KEY": "SECRET_VALUE"})
+
+    assert result.backend == "live"
+    assert result.findings == ["scope: Use worker env key."]
+    assert "SECRET_VALUE" not in json.dumps(result.to_dict())
+
+
 def test_incomplete_live_response_is_normalized() -> None:
     def fake_generate(_prompt: str) -> gemma_client.GemmaResponse:
         return gemma_client.GemmaResponse(success=True, text="scope: Normalize this plain text.", model="mock-gemma")

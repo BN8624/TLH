@@ -143,3 +143,54 @@ def test_live_worker_limit_does_not_mutate_process_env(monkeypatch, tmp_path: Pa
 
     assert os.environ.get("TLH_FORCE_WORKER_BACKEND") is None
     assert os.environ.get("TLH_LIVE_WORKER_INDEX") is None
+
+
+def test_dispatch_assigns_distinct_key_slots_to_live_workers(monkeypatch, tmp_path: Path) -> None:
+    init_project(tmp_path)
+    (tmp_path / ".env").write_text(
+        "\n".join(f"GOOGLE_API_KEY_{slot}=SECRET_{slot}" for slot in range(1, 23)),
+        encoding="utf-8",
+    )
+    rows = [card(f"T{index:03d}").to_dict() for index in range(1, 12)]
+    monkeypatch.setenv("TLH_WORKER_BACKEND", "auto")
+    monkeypatch.delenv("TLH_GEMMA_API_KEY", raising=False)
+    monkeypatch.setenv("TLH_LIVE_WORKER_LIMIT", "11")
+
+    def fake_run_worker(
+        task_card: TaskCard,
+        env: dict[str, str] | None = None,
+        routing_decision: LiveRoutingDecision | None = None,
+    ) -> WorkerResult:
+        assert env is not None
+        assert routing_decision is not None
+        backend = routing_decision.selected_backend
+        key_slot = env.get("TLH_GEMMA_KEY_SLOT")
+        if backend == "live":
+            assert key_slot is not None
+            assert env["TLH_GEMMA_API_KEY"] == f"SECRET_{key_slot}"
+        return WorkerResult(
+            task_id=task_card.task_id,
+            worker_id=f"{backend}-{task_card.worker_role}",
+            summary=f"{backend} result",
+            findings=[f"scope: {backend} result"],
+            backend=backend,
+            stub_generated=backend != "live",
+            live_generated=backend == "live",
+            metadata={
+                "backend": backend,
+                "selected_backend": backend,
+                "requested_backend": routing_decision.requested_backend,
+                "key_slot": int(key_slot) if key_slot else None,
+                "available_key_slots": int(env.get("TLH_GEMMA_KEY_POOL_AVAILABLE_SLOTS", "0")),
+                "key_pool_mode": env.get("TLH_GEMMA_KEY_POOL_MODE", ""),
+            },
+        )
+
+    monkeypatch.setattr(dispatcher, "run_worker", fake_run_worker)
+
+    results = dispatcher.dispatch(tmp_path, "run-limit", rows)
+
+    assert [result.backend for result in results] == ["live"] * 11
+    assert [result.metadata["key_slot"] for result in results] == list(range(1, 12))
+    written = (tmp_path / "machine" / "runs" / "run-limit" / "worker_results.jsonl").read_text(encoding="utf-8")
+    assert "SECRET_" not in written

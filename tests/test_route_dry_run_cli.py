@@ -124,6 +124,24 @@ def test_cli_json_output(tmp_path: Path) -> None:
     assert payload["guards"]["force_live_bypassed_limit"] is False
 
 
+def test_cli_json_output_includes_safe_key_pool_summary(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "\n".join(f"GOOGLE_API_KEY_{slot}=SECRET_{slot}" for slot in range(1, 23)),
+        encoding="utf-8",
+    )
+
+    result = run_route(tmp_path, "--workers", "11", "--mode", "limited_live", "--live-limit", "11", "--json")
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["backend_mix"]["live"] == 11
+    assert payload["key_pool"]["available_key_slots"] == 22
+    assert payload["key_pool"]["assigned_key_slots"] == list(range(1, 12))
+    assert payload["key_pool"]["distinct_key_slots_used"] == 11
+    assert payload["key_pool"]["single_key_mode"] is False
+    assert "SECRET_" not in result.stdout
+
+
 def test_cli_invalid_workers_fails_without_artifacts(tmp_path: Path) -> None:
     result = run_route(tmp_path, "--workers", "0")
 

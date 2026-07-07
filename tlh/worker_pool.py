@@ -26,7 +26,8 @@ def run_worker(
 ) -> WorkerResult:
     env = env or os.environ
     mode = routing_decision.selected_backend if routing_decision else _backend_mode(card, env)
-    live_generate = live_generate or gemma_client.generate
+    if live_generate is None:
+        live_generate = _generate_with_env(env)
 
     if mode == "stub":
         return _stub_result(card, backend="stub", env=env, routing_decision=routing_decision)
@@ -71,6 +72,17 @@ def _backend_mode(card: TaskCard, env: Mapping[str, str]) -> str:
     if hint:
         return hint
     return env.get("TLH_WORKER_BACKEND", "stub").strip().lower() or "stub"
+
+
+def _generate_with_env(env: Mapping[str, str]) -> GemmaGenerate:
+    def generate(prompt: str) -> gemma_client.GemmaResponse:
+        try:
+            config = gemma_client.load_config(env)
+        except gemma_client.GemmaUnavailable as exc:
+            return gemma_client.GemmaResponse(success=False, error=str(exc), model="")
+        return gemma_client.generate(prompt, config=config)
+
+    return generate
 
 
 def _fallback_enabled(env: Mapping[str, str], default: bool) -> bool:
@@ -366,16 +378,17 @@ def _worker_metadata(
     fallback_used: bool,
     routing_decision: LiveRoutingDecision | None,
 ) -> dict[str, int | str | bool | None]:
+    env = env or {}
     if routing_decision:
         metadata = routing_decision.to_metadata()
         metadata["backend"] = backend
         metadata["selected_backend"] = backend
         metadata["fallback_used"] = fallback_used
+        _attach_key_pool_metadata(metadata, env, backend)
         if fallback_used:
             metadata["routing_reason"] = f"live call failed; stub fallback used: {metadata['routing_reason']}"
         return metadata
 
-    env = env or {}
     metadata: dict[str, int | str | bool | None] = {
         "backend": backend,
         "requested_backend": _backend_mode_from_env(env),
@@ -392,6 +405,7 @@ def _worker_metadata(
         metadata["live_worker_limit"] = metadata["max_live_workers"]
     if backend == "live" and env.get("TLH_LIVE_WORKER_INDEX"):
         metadata["live_worker_index"] = _int_metadata(env.get("TLH_LIVE_WORKER_INDEX", "0"))
+    _attach_key_pool_metadata(metadata, env, backend)
     return metadata
 
 
@@ -404,3 +418,15 @@ def _int_metadata(raw: str) -> int:
         return int(raw)
     except ValueError:
         return 0
+
+
+def _attach_key_pool_metadata(metadata: dict[str, int | str | bool | None], env: Mapping[str, str], backend: str) -> None:
+    available = _int_metadata(env.get("TLH_GEMMA_KEY_POOL_AVAILABLE_SLOTS", "0"))
+    if available:
+        metadata["available_key_slots"] = available
+    mode = env.get("TLH_GEMMA_KEY_POOL_MODE", "")
+    if mode:
+        metadata["key_pool_mode"] = mode
+        metadata["single_key_mode"] = mode == "single_key"
+    if env.get("TLH_GEMMA_KEY_SLOT"):
+        metadata["key_slot"] = _int_metadata(env.get("TLH_GEMMA_KEY_SLOT", "0"))

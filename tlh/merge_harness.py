@@ -202,10 +202,16 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
     fallback_stub_count = 0
     policy_routing_stub_count = 0
     first_metadata = results[0].metadata if results else {}
+    assigned_key_slots: list[int] = []
+    available_key_slots = 0
     for result in results:
         backend_mix[result.backend] = backend_mix.get(result.backend, 0) + 1
         requested = result.metadata.get("requested_backend")
         selected = result.metadata.get("selected_backend", result.backend)
+        available_key_slots = max(available_key_slots, _int_value(result.metadata.get("available_key_slots")))
+        key_slot = _int_value(result.metadata.get("key_slot"))
+        if key_slot:
+            assigned_key_slots.append(key_slot)
         if selected == "stub" and requested in {"live", "auto"}:
             if result.fallback_used:
                 fallback_stub_count += 1
@@ -223,6 +229,7 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
             "full_live_explicit": first_metadata.get("policy_mode") == "full_live"
             and "TLH_ALLOW_FULL_LIVE" in str(first_metadata.get("policy_source", "")),
         },
+        "key_pool": _key_pool_summary(available_key_slots, assigned_key_slots),
         "fallback_used": any(result.fallback_used for result in results),
         "policy_routing_stub_count": policy_routing_stub_count,
         "fallback_stub_count": fallback_stub_count,
@@ -242,4 +249,29 @@ def _routing_lines(routing: dict) -> list[str]:
         f"stub WorkerResults: {mix.get('stub', 0)}",
         f"policy routing stub count: {routing.get('policy_routing_stub_count', 0)}",
         f"fallback stub count: {routing.get('fallback_stub_count', 0)}",
+        f"available key slots: {routing.get('key_pool', {}).get('available_key_slots', 0)}",
+        f"assigned key slots: {_slot_list(routing.get('key_pool', {}).get('assigned_key_slots', []))}",
+        f"distinct key slots used: {routing.get('key_pool', {}).get('distinct_key_slots_used', 0)}",
+        f"single-key mode: {routing.get('key_pool', {}).get('single_key_mode', True)}",
     ]
+
+
+def _key_pool_summary(available_key_slots: int, assigned_key_slots: list[int]) -> dict:
+    distinct = sorted(set(assigned_key_slots))
+    return {
+        "available_key_slots": available_key_slots,
+        "assigned_key_slots": distinct,
+        "distinct_key_slots_used": len(distinct),
+        "single_key_mode": available_key_slots <= 1,
+    }
+
+
+def _slot_list(slots) -> str:
+    return ",".join(str(slot) for slot in slots) if slots else "none"
+
+
+def _int_value(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0

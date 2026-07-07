@@ -308,7 +308,9 @@ def _requests_live(requested: str, env: Mapping[str, str]) -> bool:
     if requested == "live":
         return True
     if requested == "auto":
-        return bool(env.get("TLH_GEMMA_API_KEY", "").strip())
+        return bool(env.get("TLH_GEMMA_API_KEY", "").strip()) or _parse_limit(
+            env.get("TLH_GEMMA_KEY_POOL_AVAILABLE_SLOTS", "0")
+        ) > 0
     return False
 
 
