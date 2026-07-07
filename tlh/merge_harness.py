@@ -223,6 +223,11 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
     max_concurrent_live_workers = 0
     target_live_workers = 0
     wave_indices: set[int] = set()
+    runtime_execution_model = "sequential"
+    actual_concurrency_limited = False
+    per_wave_worker_counts: dict[int, int] = {}
+    per_wave_live_results: dict[int, int] = {}
+    per_wave_fallback_results: dict[int, int] = {}
     for result in results:
         backend_mix[result.backend] = backend_mix.get(result.backend, 0) + 1
         requested = result.metadata.get("requested_backend")
@@ -257,6 +262,15 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
         wave_index = _int_value(result.metadata.get("wave_index"))
         if wave_index:
             wave_indices.add(wave_index)
+            per_wave_worker_counts[wave_index] = per_wave_worker_counts.get(wave_index, 0) + 1
+            if result.backend == "live":
+                per_wave_live_results[wave_index] = per_wave_live_results.get(wave_index, 0) + 1
+            if result.fallback_used:
+                per_wave_fallback_results[wave_index] = per_wave_fallback_results.get(wave_index, 0) + 1
+        if result.metadata.get("runtime_execution_model") == "concurrent_wave":
+            runtime_execution_model = "concurrent_wave"
+        if result.metadata.get("actual_concurrency_limited"):
+            actual_concurrency_limited = True
         retry_count = _int_value(result.metadata.get("retry_count"))
         first_error_type = str(result.metadata.get("first_error_type", "none"))
         if first_error_type in {"timeout", "api_503_high_demand", "api_500_internal", "api_429_rate_limit"}:
@@ -294,6 +308,7 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
             "jitter_enabled": jitter_enabled,
             "retry_budget_enabled": retry_budget_enabled,
             "retry_budget_limit": retry_budget_limit,
+            "retry_budget_scope": "run",
             "retryable_error_count": retryable_error_count,
             "retried_worker_count": retried_worker_count,
             "retry_success_count": retry_success_count,
@@ -307,10 +322,18 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
             "enabled": wave_enabled,
             "wave_size": wave_size,
             "wave_count": wave_count,
+            "runtime_execution_model": runtime_execution_model,
+            "actual_concurrency_limited": actual_concurrency_limited,
             "max_concurrent_live_workers": max_concurrent_live_workers,
             "target_live_workers": target_live_workers,
             "actual_live_workers": backend_mix.get("live", 0),
             "waves_observed": sorted(wave_indices),
+            "waves_executed": len(wave_indices),
+            "per_wave_worker_counts": {str(key): per_wave_worker_counts[key] for key in sorted(per_wave_worker_counts)},
+            "per_wave_live_results": {str(key): per_wave_live_results.get(key, 0) for key in sorted(per_wave_worker_counts)},
+            "per_wave_fallback_results": {
+                str(key): per_wave_fallback_results.get(key, 0) for key in sorted(per_wave_worker_counts)
+            },
             "successful_workers_rerun": False,
             "retry_within_wave": True,
             "preserve_key_slot": True,
@@ -343,9 +366,15 @@ def _routing_lines(routing: dict) -> list[str]:
         f"wave policy enabled: {wave.get('enabled', False)}",
         f"wave size: {wave.get('wave_size', 'none')}",
         f"wave count: {wave.get('wave_count', 0)}",
+        f"runtime execution model: {wave.get('runtime_execution_model', 'sequential')}",
+        f"actual concurrency limited: {wave.get('actual_concurrency_limited', False)}",
         f"max concurrent live workers: {wave.get('max_concurrent_live_workers', 0)}",
         f"target live workers: {wave.get('target_live_workers', 0)}",
         f"actual live workers: {wave.get('actual_live_workers', 0)}",
+        f"waves executed: {wave.get('waves_executed', 0)}",
+        f"per-wave worker counts: {wave.get('per_wave_worker_counts', {})}",
+        f"per-wave live results: {wave.get('per_wave_live_results', {})}",
+        f"per-wave fallback results: {wave.get('per_wave_fallback_results', {})}",
         f"retry policy enabled: {retry.get('enabled', False)}",
         f"max retry attempts: {retry.get('max_retry_attempts', 0)}",
         f"retry backoff enabled: {retry.get('backoff_enabled', False)}",
@@ -353,6 +382,7 @@ def _routing_lines(routing: dict) -> list[str]:
         f"retry jitter enabled: {retry.get('jitter_enabled', False)}",
         f"retry budget enabled: {retry.get('retry_budget_enabled', False)}",
         f"retry budget limit: {retry.get('retry_budget_limit', 0)}",
+        f"retry budget scope: {retry.get('retry_budget_scope', 'run')}",
         f"retryable error count: {retry.get('retryable_error_count', 0)}",
         f"retried worker count: {retry.get('retried_worker_count', 0)}",
         f"retry success count: {retry.get('retry_success_count', 0)}",

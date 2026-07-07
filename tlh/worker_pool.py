@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import threading
 import time
 from typing import Callable, Mapping
 
@@ -26,6 +27,28 @@ DEFAULT_RETRY_BUDGET_LIMIT = 5
 RETRYABLE_ERROR_TYPES = {"timeout", "api_503_high_demand", "api_500_internal", "api_429_rate_limit"}
 
 
+class RetryBudget:
+    def __init__(self, limit: int, enabled: bool = True) -> None:
+        self.limit = max(0, limit)
+        self.enabled = enabled
+        self._remaining = self.limit
+        self._lock = threading.Lock()
+
+    @property
+    def remaining(self) -> int:
+        with self._lock:
+            return self._remaining
+
+    def claim(self) -> bool:
+        if not self.enabled:
+            return True
+        with self._lock:
+            if self._remaining <= 0:
+                return False
+            self._remaining -= 1
+            return True
+
+
 def run_worker(
     card: TaskCard,
     env: Mapping[str, str] | None = None,
@@ -33,6 +56,7 @@ def run_worker(
     routing_decision: LiveRoutingDecision | None = None,
     retry_sleep: RetrySleep | None = None,
     retry_jitter: RetryJitter | None = None,
+    retry_budget: RetryBudget | None = None,
 ) -> WorkerResult:
     env = env or os.environ
     mode = routing_decision.selected_backend if routing_decision else _backend_mode(card, env)
@@ -89,6 +113,7 @@ def run_worker(
         live_generate,
         retry_sleep=retry_sleep,
         retry_jitter=retry_jitter,
+        retry_budget=retry_budget,
     )
     if response.success:
         return _normalize_live_result(card, response, env, routing_decision, telemetry=telemetry)
@@ -143,12 +168,13 @@ def _run_live_with_retry(
     live_generate: GemmaGenerate,
     retry_sleep: RetrySleep | None = None,
     retry_jitter: RetryJitter | None = None,
+    retry_budget: RetryBudget | None = None,
 ) -> tuple[gemma_client.GemmaResponse, dict]:
     started = time.monotonic()
     max_retries = _max_retry_attempts(env)
     backoff_schedule = _retry_backoff_schedule(env, max_retries)
-    budget_limit = _retry_budget_limit(env)
-    budget_remaining = _retry_budget_remaining(env, budget_limit)
+    budget_limit = retry_budget.limit if retry_budget else _retry_budget_limit(env)
+    budget_remaining = retry_budget.remaining if retry_budget else _retry_budget_remaining(env, budget_limit)
     budget_consumed = False
     sleep = retry_sleep or time.sleep
     jitter = retry_jitter or random.uniform
@@ -192,13 +218,22 @@ def _run_live_with_retry(
         retry_skipped_reason = ""
         delay_seconds = 0.0
         if can_retry:
-            if budget_remaining <= 0 and not budget_consumed:
+            if not budget_consumed and retry_budget:
+                if retry_budget.claim():
+                    budget_consumed = True
+                    budget_remaining = retry_budget.remaining
+                else:
+                    can_retry = False
+                    retry_skipped_reason = "retry budget exhausted"
+                    budget_remaining = retry_budget.remaining
+            elif budget_remaining <= 0 and not budget_consumed:
                 can_retry = False
                 retry_skipped_reason = "retry budget exhausted"
             else:
                 if not budget_consumed:
                     budget_consumed = True
                     budget_remaining -= 1
+            if can_retry:
                 delay_seconds = backoff_schedule[min(attempt_index, len(backoff_schedule) - 1)] if backoff_schedule else 0.0
                 jitter_seconds = _retry_jitter_seconds(env, jitter)
                 delay_seconds += jitter_seconds
@@ -229,13 +264,13 @@ def _run_live_with_retry(
             last_error_type=last_error_type,
             final_error_type=error_type,
             error_message=safe_error,
-            max_retries=max_retries,
-            backoff_schedule=backoff_schedule,
-            budget_limit=budget_limit,
-            budget_remaining=budget_remaining,
-            budget_consumed=budget_consumed,
-            retry_skipped_reason=retry_skipped_reason,
-        )
+                max_retries=max_retries,
+                backoff_schedule=backoff_schedule,
+                budget_limit=budget_limit,
+                budget_remaining=retry_budget.remaining if retry_budget else budget_remaining,
+                budget_consumed=budget_consumed,
+                retry_skipped_reason=retry_skipped_reason,
+            )
         return response, telemetry
     return response, _telemetry_without_live_attempt(env, routing_decision, "stub", True, "unknown", "unknown")
 
@@ -730,6 +765,14 @@ def _attach_wave_metadata(metadata: dict, env: Mapping[str, str]) -> None:
     metadata["successful_workers_rerun"] = env.get(
         "TLH_LIVE_WAVE_SUCCESSFUL_WORKERS_RERUN", "false"
     ).strip().lower() in {"1", "true", "yes", "on"}
+    metadata["runtime_execution_model"] = env.get(
+        "TLH_LIVE_RUNTIME_EXECUTION_MODEL",
+        "concurrent_wave" if enabled else "sequential",
+    )
+    metadata["actual_concurrency_limited"] = env.get(
+        "TLH_LIVE_ACTUAL_CONCURRENCY_LIMITED",
+        "true" if enabled else "false",
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _telemetry_without_live_attempt(
@@ -795,6 +838,8 @@ def _finish_live_telemetry(
         "live_limit": routing_decision.max_live_workers if routing_decision else _int_metadata(env.get("TLH_LIVE_WORKER_LIMIT", "0")),
         "started_monotonic": round(started, 6),
         "ended_monotonic": round(ended, 6),
+        "worker_started_at": round(started, 6),
+        "worker_finished_at": round(ended, 6),
         "latency_ms": _latency_ms(started, ended),
         "attempt_count": attempt_count,
         "retry_count": retry_count,
@@ -806,6 +851,7 @@ def _finish_live_telemetry(
         "retry_jitter_enabled": _retry_jitter_enabled(env),
         "retry_budget_enabled": _retry_budget_enabled(env),
         "retry_budget_applied": _retry_budget_enabled(env),
+        "retry_budget_scope": "run",
         "retry_budget_limit": budget_limit,
         "retry_budget_remaining": budget_remaining,
         "retry_budget_consumed": budget_consumed,

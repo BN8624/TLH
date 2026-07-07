@@ -69,6 +69,7 @@ S-15 Retry Backoff / Jitter / Retry Budget Policy completed with PASS-candidate 
 S-16 Controlled Live-22 Backoff Retry Trial completed with PARTIAL quality: run_id `run-20260707-135313`, timeout 300s, limited_live live-limit 22, preflight live 22 / stub 0 / fallback 0, actual live 13 / stub 9 / fallback 9, available key slots 22, assigned key slots 1-22, distinct key slots used 22, single-key mode NO, max retry attempts 2, backoff and jitter enabled, retry budget 5 workers per run, retryable error count 11, retried worker count 5, retry success count 2, retry failure count 3, fallback after retry count 3, retry budget exhausted count 6, fallback causes API 503 high demand and API 500 internal error, baseline unchanged at live-limit 5 with timeout 300s, raw artifacts ignored and not committed.
 S-17 Live Concurrency Wave Policy completed with PASS-candidate tests: wave policy can limit simultaneous live calls while preserving target live workers; `python -m tlh route-dry-run` supports `--live-wave-size`; worker_count 22 with live-limit 22 and wave-size 11 plans two waves with max concurrent live workers 11; key slots 1-22 remain distinctly assigned; WorkerResult, FinalPacket, and CodexPrompt summaries include wave metadata; successful workers are not rerun; retry remains worker-targeted and preserves key_slot; no actual live-22 wave run was executed; live-limit 22 remains a capacity/wave trial result, not a baseline.
 S-18 Controlled Live-22 Wave Trial completed with FAIL-candidate quality: run_id `run-20260707-170719`, timeout 300s, limited_live live-limit 22, live-wave-size 11, preflight live 22 / stub 0 / fallback 0, wave-count 2, max concurrent live workers 11, actual live 10 / stub 12 / fallback 12, available key slots 22, assigned key slots 1-22, distinct key slots used 22, single-key mode NO, max retry attempts 2, backoff and jitter enabled, retry budget 5 workers per run, retryable error count 14, retried worker count 5, retry success count 2, retry failure count 3, fallback after retry count 3, retry budget exhausted count 9, fallback causes API 500 internal error and API 503 high demand, comparison vs S-16 worse, runtime semantics review found current dispatcher execution is sequential and wave-size affects execution order/metadata rather than actual concurrent API call count, baseline unchanged at live-limit 5 with timeout 300s, raw artifacts ignored and not committed.
+S-17R/S-18R Runtime Wave Semantics Fix completed with PASS-candidate tests: previous wave policy affected execution order/metadata only; dispatcher now executes workers concurrently within each wave using `ThreadPoolExecutor`; wave-size limits actual concurrent `run_worker` calls; worker_count 22 with live-limit 22 and wave-size 11 plans two waves with max concurrent live workers 11; wave 2 starts after wave 1 completes; result order remains deterministic by worker_index; retry budget is run-scoped and thread-safe; successful workers are not rerun; retry preserves key_slot; route-dry-run text/JSON report `runtime_execution_model: concurrent_wave`; no actual live-22 wave run was executed; live-limit 22 remains a capacity/wave trial result, not a baseline.
 
 The MVP currently proves the following flow with stub workers.
 
@@ -128,6 +129,7 @@ Per-worker live telemetry with latency, key_slot, backend, fallback, error, and 
 Targeted retry policy for transient live worker failures.
 Retry backoff, jitter, and per-run retry budget policy for transient live worker failures.
 Live concurrency wave policy and route-dry-run wave planning.
+True concurrent wave execution with run-scoped retry budget locking.
 Mock live adapter tests.
 One-live-worker live dry run review.
 Multi-live limit dry run review.
@@ -186,7 +188,7 @@ The approved baseline is live-limit 5 with `TLH_GEMMA_TIMEOUT_SECONDS=300`.
 python -m tlh route-dry-run --workers 11 --mode limited_live --live-limit 5
 ```
 
-The next controlled scaling decision should be S-17R/S-18R Runtime Wave Semantics Review. S-18 showed wave-size 11 was worse than S-16 under the same live-limit 22 and retry budget, but current wave-size does not actually limit concurrent API calls because worker dispatch is sequential; review whether TLH needs true concurrent wave execution, per-wave cooldown/pacing, or a simpler sequential pacing policy before another live-limit 22 attempt.
+The next controlled scaling decision can be a user-approved live-limit 22 true concurrent wave trial using route-dry-run preflight first. S-17R/S-18R changed runtime semantics, so do not compare any future wave trial to S-18 as if S-18 had true concurrent wave limiting.
 
 ---
 
@@ -243,6 +245,7 @@ S-15 improves retry resilience with two attempts, backoff, jitter, and a retry b
 S-16 shows live-limit 22 is still not stable under the current retry budget; do not promote live-limit 22 to baseline.
 S-17 adds wave concurrency planning for live-limit 22, but does not promote live-limit 22 to baseline.
 S-18 shows live-limit 22 with wave-size 11 is not stable and was worse than S-16 on live count, fallback count, retryable error count, and retry budget exhaustion; do not promote live-limit 22 or wave-size 11 to baseline. Treat S-18 as a wave metadata/order trial, not proof that a real concurrency limiter worsened API pressure.
+S-17R/S-18R makes wave-size a real runtime concurrency limiter and keeps retry budget run-scoped; it does not promote live-limit 22 or wave-size 11 to baseline.
 
 Later decisions.
 
@@ -281,7 +284,7 @@ MinimalityCheck notes
 ## Recommended Next Slice
 
 ```text
-Run S-17R/S-18R Runtime Wave Semantics Review before another live-limit 22 trial. Confirm whether TLH should add true concurrent wave execution, keep sequential execution with explicit pacing, or reinterpret wave-size as metadata/order only.
+Run another live-limit 22 trial only with explicit approval and route-dry-run wave preflight. Future S-19-style trial should validate the new true concurrent wave runtime, not the old S-18 metadata/order semantics.
 Keep API key values out of output, notes, logs, and commits.
 ```
 
