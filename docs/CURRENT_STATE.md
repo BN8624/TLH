@@ -62,6 +62,7 @@ S-7 adds `python -m tlh route-dry-run` for policy-only text and JSON routing pre
 S-9 Controlled Live-5 Trial completed with PARTIAL quality: run_id `run-20260707-080817`, preflight live 5 / stub 6 / fallback 0, actual live 3 / stub 8 / fallback 2, cause two live calls timed out at 120s, decision retry live-limit 5 with `TLH_GEMMA_TIMEOUT_SECONDS=300`, raw artifacts ignored and not committed.
 S-9R Controlled Live-5 Retry with Extended Timeout completed with PASS quality: run_id `run-20260707-113239`, timeout 300s, preflight live 5 / stub 6 / fallback 0, actual live 5 / stub 6 / fallback 0, fallback cause none, decision live-limit 5 with `TLH_GEMMA_TIMEOUT_SECONDS=300` is the approved live scaling baseline, raw artifacts ignored and not committed.
 S-11 Controlled Live-11 One-Shot Trial completed with PASS quality: run_id `run-20260707-115105`, timeout 300s, limited_live live-limit 11, preflight live 11 / stub 0 / fallback 0, actual live 11 / stub 0 / fallback 0, full_live-equivalent YES, native full_live mode not used, user approved beyond five YES, available key slots 22, distinct key slots used 11, single-key mode NO, raw artifacts ignored and not committed.
+S-12 Controlled Live-22 Capacity Trial completed with PARTIAL quality: run_id `run-20260707-120538`, timeout 300s, limited_live live-limit 22, preflight live 22 / stub 0 / fallback 0, actual live 20 / stub 2 / fallback 2, available key slots 22, assigned key slots 1-22, distinct key slots used 22, single-key mode NO, fallback causes API 503 high demand and API 500 internal error, live-limit 22 is not promoted to baseline, raw artifacts ignored and not committed.
 
 The MVP currently proves the following flow with stub workers.
 
@@ -223,6 +224,7 @@ User approval is required before increasing the live worker count beyond five.
 Route-dry-run preflight remains mandatory before every live-worker scaling run.
 S-9R shows live-limit 5 can complete without fallback when `TLH_GEMMA_TIMEOUT_SECONDS=300`; do not infer that full_live 11 is safe.
 S-11 was a user-approved one-shot live-limit 11 trial and does not change the approved baseline from live-limit 5.
+S-12 showed the full 22-slot key pool can be assigned distinctly, but live-limit 22 remains a one-shot capacity result and does not change the approved baseline from live-limit 5.
 
 Later decisions.
 
