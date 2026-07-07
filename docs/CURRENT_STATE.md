@@ -60,7 +60,7 @@ S-5 centralizes live/stub decisions in `tlh.live_routing` and records policy dec
 S-6 verifies worker counts 3, 5, and 11 without live API calls, hardens force-live so it cannot bypass live limits, and removes stale stub-only language from generated handoff outputs.
 S-7 adds `python -m tlh route-dry-run` for policy-only text and JSON routing previews without live API calls or run artifacts.
 S-9 Controlled Live-5 Trial completed with PARTIAL quality: run_id `run-20260707-080817`, preflight live 5 / stub 6 / fallback 0, actual live 3 / stub 8 / fallback 2, cause two live calls timed out at 120s, decision retry live-limit 5 with `TLH_GEMMA_TIMEOUT_SECONDS=300`, raw artifacts ignored and not committed.
-S-9R Controlled Live-5 Retry with Extended Timeout completed with PASS quality: run_id `run-20260707-113239`, timeout 300s, preflight live 5 / stub 6 / fallback 0, actual live 5 / stub 6 / fallback 0, fallback cause none, decision live-limit 5 is stable under 300s timeout, raw artifacts ignored and not committed.
+S-9R Controlled Live-5 Retry with Extended Timeout completed with PASS quality: run_id `run-20260707-113239`, timeout 300s, preflight live 5 / stub 6 / fallback 0, actual live 5 / stub 6 / fallback 0, fallback cause none, decision live-limit 5 with `TLH_GEMMA_TIMEOUT_SECONDS=300` is the approved live scaling baseline, raw artifacts ignored and not committed.
 
 The MVP currently proves the following flow with stub workers.
 
@@ -167,9 +167,10 @@ No README is required for now because this is a solo project.
 ## Next Action
 
 Use the CLI-visible routing dry-run command before any future live-worker scaling run.
+The approved baseline is live-limit 5 with `TLH_GEMMA_TIMEOUT_SECONDS=300`.
 
 ```text
-python -m tlh route-dry-run --workers 11 --mode limited_live --live-limit 2
+python -m tlh route-dry-run --workers 11 --mode limited_live --live-limit 5
 ```
 
 ---
@@ -213,9 +214,11 @@ TLH native MCP is not required for current TLH work.
 
 ## Open Decisions
 
-User approval is required before increasing the live worker count beyond two.
+Live-limit 5 with `TLH_GEMMA_TIMEOUT_SECONDS=300` is approved as the current scaling baseline.
+User approval is required before increasing the live worker count beyond five.
 `full_live` must not be enabled without explicit opt-in.
 `TLH_FORCE_WORKER_BACKEND=live` must not bypass live limits or imply full_live.
+Route-dry-run preflight remains mandatory before every live-worker scaling run.
 S-9R shows live-limit 5 can complete without fallback when `TLH_GEMMA_TIMEOUT_SECONDS=300`; do not infer that full_live 11 is safe.
 
 Later decisions.
