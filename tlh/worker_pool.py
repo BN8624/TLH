@@ -7,6 +7,7 @@ import os
 from typing import Callable, Mapping
 
 from . import gemma_client
+from .live_routing import LiveRoutingDecision
 from .schemas import TaskCard, WorkerResult
 
 
@@ -17,29 +18,48 @@ class WorkerBackendError(RuntimeError):
 GemmaGenerate = Callable[[str], gemma_client.GemmaResponse]
 
 
-def run_worker(card: TaskCard, env: Mapping[str, str] | None = None, live_generate: GemmaGenerate | None = None) -> WorkerResult:
+def run_worker(
+    card: TaskCard,
+    env: Mapping[str, str] | None = None,
+    live_generate: GemmaGenerate | None = None,
+    routing_decision: LiveRoutingDecision | None = None,
+) -> WorkerResult:
     env = env or os.environ
-    mode = _backend_mode(card, env)
+    mode = routing_decision.selected_backend if routing_decision else _backend_mode(card, env)
     live_generate = live_generate or gemma_client.generate
 
     if mode == "stub":
-        return _stub_result(card, backend="stub", env=env)
+        return _stub_result(card, backend="stub", env=env, routing_decision=routing_decision)
 
     if mode == "auto" and not gemma_client.is_configured(env):
-        return _stub_result(card, backend="stub", fallback_used=True, error="Live Gemma is not configured; auto used stub.", env=env)
+        return _stub_result(
+            card,
+            backend="stub",
+            fallback_used=True,
+            error="Live Gemma is not configured; auto used stub.",
+            env=env,
+            routing_decision=routing_decision,
+        )
 
     if mode not in {"live", "auto"}:
-        return _stub_result(card, backend="stub", fallback_used=True, error=f"Unsupported backend `{mode}`; used stub.", env=env)
+        return _stub_result(
+            card,
+            backend="stub",
+            fallback_used=True,
+            error=f"Unsupported backend `{mode}`; used stub.",
+            env=env,
+            routing_decision=routing_decision,
+        )
 
     prompt = gemma_client.build_worker_prompt(card)
     response = live_generate(prompt)
     if response.success:
-        return _normalize_live_result(card, response, env)
+        return _normalize_live_result(card, response, env, routing_decision)
 
     error = _redact_error(response.error, env)
     fallback = _fallback_enabled(env, default=(mode == "auto"))
     if fallback:
-        return _stub_result(card, backend="stub", fallback_used=True, error=error, env=env)
+        return _stub_result(card, backend="stub", fallback_used=True, error=error, env=env, routing_decision=routing_decision)
     raise WorkerBackendError(error or "Live Gemma worker failed.")
 
 
@@ -67,7 +87,12 @@ def _redact_error(error: str, env: Mapping[str, str]) -> str:
     return error
 
 
-def _normalize_live_result(card: TaskCard, response: gemma_client.GemmaResponse, env: Mapping[str, str]) -> WorkerResult:
+def _normalize_live_result(
+    card: TaskCard,
+    response: gemma_client.GemmaResponse,
+    env: Mapping[str, str],
+    routing_decision: LiveRoutingDecision | None,
+) -> WorkerResult:
     data = _parse_live_text(response.text)
     missing: list[str] = []
 
@@ -107,7 +132,7 @@ def _normalize_live_result(card: TaskCard, response: gemma_client.GemmaResponse,
         model=response.model,
         fallback_used=False,
         error="",
-        metadata=_worker_metadata(env, backend="live"),
+        metadata=_worker_metadata(env, backend="live", fallback_used=False, routing_decision=routing_decision),
     )
 
 
@@ -201,6 +226,7 @@ def _stub_result(
     fallback_used: bool = False,
     error: str = "",
     env: Mapping[str, str] | None = None,
+    routing_decision: LiveRoutingDecision | None = None,
 ) -> WorkerResult:
     if card.merge_key == "s2_scope":
         findings = [
@@ -330,18 +356,47 @@ def _stub_result(
         model="",
         fallback_used=fallback_used,
         error=error,
-        metadata=_worker_metadata(env, backend=backend),
+        metadata=_worker_metadata(env, backend=backend, fallback_used=fallback_used, routing_decision=routing_decision),
     )
 
 
-def _worker_metadata(env: Mapping[str, str] | None, backend: str) -> dict[str, int | str]:
+def _worker_metadata(
+    env: Mapping[str, str] | None,
+    backend: str,
+    fallback_used: bool,
+    routing_decision: LiveRoutingDecision | None,
+) -> dict[str, int | str | bool | None]:
+    if routing_decision:
+        metadata = routing_decision.to_metadata()
+        metadata["backend"] = backend
+        metadata["selected_backend"] = backend
+        metadata["fallback_used"] = fallback_used
+        if fallback_used:
+            metadata["routing_reason"] = f"live call failed; stub fallback used: {metadata['routing_reason']}"
+        return metadata
+
     env = env or {}
-    metadata: dict[str, int | str] = {"backend": backend}
+    metadata: dict[str, int | str | bool | None] = {
+        "backend": backend,
+        "requested_backend": _backend_mode_from_env(env),
+        "selected_backend": backend,
+        "policy_mode": "legacy",
+        "fallback_used": fallback_used,
+        "fallback_allowed": _fallback_enabled(env, default=True),
+        "routing_reason": "legacy worker invocation without routing decision",
+        "routing_source": "worker_pool",
+        "policy_source": "legacy",
+    }
     if env.get("TLH_LIVE_WORKER_LIMIT"):
-        metadata["live_worker_limit"] = _int_metadata(env.get("TLH_LIVE_WORKER_LIMIT", "0"))
+        metadata["max_live_workers"] = _int_metadata(env.get("TLH_LIVE_WORKER_LIMIT", "0"))
+        metadata["live_worker_limit"] = metadata["max_live_workers"]
     if backend == "live" and env.get("TLH_LIVE_WORKER_INDEX"):
         metadata["live_worker_index"] = _int_metadata(env.get("TLH_LIVE_WORKER_INDEX", "0"))
     return metadata
+
+
+def _backend_mode_from_env(env: Mapping[str, str]) -> str:
+    return env.get("TLH_WORKER_BACKEND", "stub").strip().lower() or "stub"
 
 
 def _int_metadata(raw: str) -> int:

@@ -10,6 +10,7 @@ S-1Q merge and final quality fix completed with PASS quality.
 S-2 live Gemma adapter is implemented with stub-safe fallback.
 S-3 controlled one-live-worker run completed with PASS quality.
 S-4 controlled multi-live limit dry run completed with PASS quality.
+S-5 controlled live-worker routing policy is implemented with PASS-candidate tests.
 
 The project direction is defined.
 AICO is deprecated and must not be used as the architecture base.
@@ -47,10 +48,11 @@ docs\TLH_IMPLEMENTATION_PROMPT.md
 
 ## Current Goal
 
-Prepare for a controlled live-worker scaling policy.
+Prepare for controlled policy dry runs across larger worker counts.
 
 S-3 proved that one TaskCard can run live with `gemma-4-31b-it` while the remaining TaskCard stays stub-safe.
 S-4 proved that two TaskCards can run live with `gemma-4-31b-it` while remaining TaskCards stay stub-safe under `TLH_LIVE_WORKER_LIMIT=2`.
+S-5 centralizes live/stub decisions in `tlh.live_routing` and records policy decisions in WorkerResult, MergePacket, FinalPacket, and CodexPrompt outputs.
 
 The MVP currently proves the following flow with stub workers.
 
@@ -98,11 +100,14 @@ Live Gemma adapter with lazy SDK import.
 Per-TaskCard backend hints for one-live-worker validation.
 Run-level live worker limit with `TLH_LIVE_WORKER_LIMIT`.
 WorkerResult metadata for `live_worker_limit` and `live_worker_index`.
+Centralized `LiveRoutingPolicy` and `LiveRoutingDecision`.
+FinalPacket and CodexPrompt backend mix and routing policy summaries.
 Fenced JSON live output normalization.
 Stub fallback for missing or failed live configuration.
 Mock live adapter tests.
 One-live-worker live dry run review.
 Multi-live limit dry run review.
+Controlled live-worker routing policy review.
 ```
 
 Excluded.
@@ -148,10 +153,10 @@ No README is required for now because this is a solo project.
 
 ## Next Action
 
-Define a controlled live-worker scaling policy with an explicit count limit and rollback criteria.
+Run controlled policy dry runs across larger worker counts without enabling default full_live.
 
 ```text
-S-5 controlled live-worker scaling policy.
+S-6 controlled routing policy dry run.
 ```
 
 ---
@@ -179,6 +184,7 @@ Do not duplicate AI_WORKFLOW_KIT global features.
 ## Open Decisions
 
 User approval is required before increasing the live worker count beyond two.
+`full_live` must not be enabled without explicit opt-in.
 
 Later decisions.
 
@@ -217,7 +223,7 @@ MinimalityCheck notes
 ## Recommended Next Slice
 
 ```text
-Define controlled live-worker scaling policy after S-4 PASS.
+Run controlled policy dry runs across larger worker counts using the S-5 policy object.
 Keep API key values out of output, notes, logs, and commits.
 ```
 

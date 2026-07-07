@@ -278,6 +278,12 @@ def _codex_prompt_text(state: dict, packet: dict, sections: dict[str, list[str]]
             "## Environment Variables",
             markdown_list(sections["EnvironmentVariables"]),
             "",
+            "## Backend Mix",
+            markdown_list(_routing_lines(packet)),
+            "",
+            "## Routing Policy",
+            markdown_list(_policy_lines(packet)),
+            "",
             "## Safety Rules",
             markdown_list(sections["SecretHandling"] + sections["StubFallback"] + sections["SafetyRules"]),
             "",
@@ -321,6 +327,12 @@ def _final_packet_text(state: dict, packet: dict, sections: dict[str, list[str]]
             "",
             "## Environment Variables",
             markdown_list(sections["EnvironmentVariables"]),
+            "",
+            "## Backend Mix",
+            markdown_list(_routing_lines(packet)),
+            "",
+            "## Routing Policy",
+            markdown_list(_policy_lines(packet)),
             "",
             "## Secret Handling",
             markdown_list(sections["SecretHandling"]),
@@ -371,3 +383,25 @@ def _packet_sections(packet: dict) -> dict[str, list[str]]:
         values = sections.get(key) or fallback
         merged[key] = list(values)
     return merged
+
+
+def _routing_lines(packet: dict) -> list[str]:
+    routing = packet.get("minimality", {}).get("routing", {})
+    mix = routing.get("backend_mix", {})
+    return [
+        f"live WorkerResults: {mix.get('live', 0)}",
+        f"stub WorkerResults: {mix.get('stub', 0)}",
+        f"policy routing stub count: {routing.get('policy_routing_stub_count', 0)}",
+        f"fallback stub count: {routing.get('fallback_stub_count', 0)}",
+        f"fallback used: {routing.get('fallback_used', False)}",
+    ]
+
+
+def _policy_lines(packet: dict) -> list[str]:
+    policy = packet.get("minimality", {}).get("routing", {}).get("routing_policy", {})
+    return [
+        f"policy mode: {policy.get('mode', 'unknown')}",
+        f"max live workers: {policy.get('max_live_workers', 'unknown')}",
+        f"fallback allowed: {policy.get('fallback_allowed', 'unknown')}",
+        f"policy source: {policy.get('source', 'unknown')}",
+    ]

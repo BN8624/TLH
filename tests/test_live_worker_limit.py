@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from tlh import dispatcher
+from tlh.live_routing import LiveRoutingDecision
 from tlh.schemas import TaskCard, WorkerResult
 from tlh.vault import init_project
 
@@ -31,17 +32,22 @@ def test_live_worker_limit_caps_auto_backend(monkeypatch, tmp_path: Path) -> Non
     monkeypatch.setenv("TLH_WORKER_BACKEND", "auto")
     monkeypatch.setenv("TLH_GEMMA_API_KEY", "SECRET_VALUE")
     monkeypatch.setenv("TLH_LIVE_WORKER_LIMIT", "2")
-    calls: list[tuple[str, str, str, str]] = []
+    calls: list[tuple[str, str, int | None, int]] = []
 
-    def fake_run_worker(task_card: TaskCard, env: dict[str, str] | None = None) -> WorkerResult:
+    def fake_run_worker(
+        task_card: TaskCard,
+        env: dict[str, str] | None = None,
+        routing_decision: LiveRoutingDecision | None = None,
+    ) -> WorkerResult:
         assert env is not None
-        backend = env.get("TLH_FORCE_WORKER_BACKEND") or env.get("TLH_WORKER_BACKEND", "stub")
+        assert routing_decision is not None
+        backend = routing_decision.selected_backend
         calls.append(
             (
                 task_card.task_id,
                 backend,
-                env.get("TLH_LIVE_WORKER_INDEX", ""),
-                env.get("TLH_LIVE_WORKER_LIMIT", ""),
+                routing_decision.live_worker_index,
+                routing_decision.max_live_workers,
             )
         )
         return WorkerResult(
@@ -55,8 +61,12 @@ def test_live_worker_limit_caps_auto_backend(monkeypatch, tmp_path: Path) -> Non
             backend=backend,
             metadata={
                 "backend": backend,
-                "live_worker_limit": int(env["TLH_LIVE_WORKER_LIMIT"]),
-                **({"live_worker_index": int(env["TLH_LIVE_WORKER_INDEX"])} if backend == "live" else {}),
+                "live_worker_limit": routing_decision.max_live_workers,
+                "policy_mode": routing_decision.policy_mode,
+                "requested_backend": routing_decision.requested_backend,
+                "selected_backend": backend,
+                "routing_reason": routing_decision.routing_reason,
+                **({"live_worker_index": routing_decision.live_worker_index} if backend == "live" else {}),
             },
         )
 
@@ -65,7 +75,7 @@ def test_live_worker_limit_caps_auto_backend(monkeypatch, tmp_path: Path) -> Non
     results = dispatcher.dispatch(tmp_path, "run-limit", rows)
 
     assert [result.backend for result in results] == ["live", "live", "stub"]
-    assert calls == [("T001", "live", "1", "2"), ("T002", "live", "2", "2"), ("T003", "stub", "", "2")]
+    assert calls == [("T001", "live", 1, 2), ("T002", "live", 2, 2), ("T003", "stub", None, 2)]
     assert [result.metadata["live_worker_limit"] for result in results] == [2, 2, 2]
     assert [result.metadata.get("live_worker_index") for result in results] == [1, 2, None]
     assert "SECRET_VALUE" not in (tmp_path / "machine" / "runs" / "run-limit" / "worker_results.jsonl").read_text(
@@ -80,9 +90,14 @@ def test_live_worker_limit_zero_forces_stub(monkeypatch, tmp_path: Path) -> None
     monkeypatch.setenv("TLH_GEMMA_API_KEY", "SECRET_VALUE")
     monkeypatch.setenv("TLH_LIVE_WORKER_LIMIT", "0")
 
-    def fake_run_worker(task_card: TaskCard, env: dict[str, str] | None = None) -> WorkerResult:
+    def fake_run_worker(
+        task_card: TaskCard,
+        env: dict[str, str] | None = None,
+        routing_decision: LiveRoutingDecision | None = None,
+    ) -> WorkerResult:
         assert env is not None
-        backend = env.get("TLH_FORCE_WORKER_BACKEND") or env.get("TLH_WORKER_BACKEND", "stub")
+        assert routing_decision is not None
+        backend = routing_decision.selected_backend
         return WorkerResult(
             task_id=task_card.task_id,
             worker_id=f"{backend}-{task_card.worker_role}",
@@ -90,7 +105,7 @@ def test_live_worker_limit_zero_forces_stub(monkeypatch, tmp_path: Path) -> None
             backend=backend,
             stub_generated=backend != "live",
             live_generated=backend == "live",
-            metadata={"backend": backend, "live_worker_limit": int(env["TLH_LIVE_WORKER_LIMIT"])},
+            metadata={"backend": backend, "live_worker_limit": routing_decision.max_live_workers},
         )
 
     monkeypatch.setattr(dispatcher, "run_worker", fake_run_worker)
@@ -107,14 +122,19 @@ def test_live_worker_limit_does_not_mutate_process_env(monkeypatch, tmp_path: Pa
     monkeypatch.setenv("TLH_GEMMA_API_KEY", "SECRET_VALUE")
     monkeypatch.setenv("TLH_LIVE_WORKER_LIMIT", "1")
 
-    def fake_run_worker(task_card: TaskCard, env: dict[str, str] | None = None) -> WorkerResult:
+    def fake_run_worker(
+        task_card: TaskCard,
+        env: dict[str, str] | None = None,
+        routing_decision: LiveRoutingDecision | None = None,
+    ) -> WorkerResult:
         assert env is not None
+        assert routing_decision is not None
         return WorkerResult(
             task_id=task_card.task_id,
             worker_id="stub-builder",
             summary="stub result",
-            backend=env.get("TLH_WORKER_BACKEND", "stub"),
-            metadata={"backend": env.get("TLH_WORKER_BACKEND", "stub")},
+            backend=routing_decision.selected_backend,
+            metadata={"backend": routing_decision.selected_backend},
         )
 
     monkeypatch.setattr(dispatcher, "run_worker", fake_run_worker)

@@ -32,6 +32,7 @@ def merge(root: Path, run_id: str, rows: list[dict]) -> MergePacket:
     minimality = check_merge(run_id, kept=confirmed, dropped=dropped)
     minimality_data = minimality.to_dict()
     minimality_data["sections"] = sections
+    minimality_data["routing"] = _routing_summary(results)
     packet = MergePacket(
         merge_id=f"{run_id}-M001",
         run_id=run_id,
@@ -89,9 +90,13 @@ def _write_minimality_note(root: Path, run_id: str, minimality) -> None:
 
 def _write_artifact_note(root: Path, run_id: str, packet: MergePacket, risks: list[str]) -> None:
     sections = packet.minimality.get("sections", {})
+    routing = packet.minimality.get("routing", {})
     outputs = [
         "Confirmed points:",
         markdown_list(packet.confirmed_points),
+        "",
+        "Routing Policy:",
+        markdown_list(_routing_lines(routing)),
         "",
         "Scope:",
         markdown_list(sections.get("Scope", [])),
@@ -190,3 +195,46 @@ def _dedupe(items: list[str]) -> list[str]:
             seen.add(item)
             result.append(item)
     return result
+
+
+def _routing_summary(results: list[WorkerResult]) -> dict:
+    backend_mix = {"live": 0, "stub": 0}
+    fallback_stub_count = 0
+    policy_routing_stub_count = 0
+    first_metadata = results[0].metadata if results else {}
+    for result in results:
+        backend_mix[result.backend] = backend_mix.get(result.backend, 0) + 1
+        requested = result.metadata.get("requested_backend")
+        selected = result.metadata.get("selected_backend", result.backend)
+        if selected == "stub" and requested in {"live", "auto"}:
+            if result.fallback_used:
+                fallback_stub_count += 1
+            else:
+                policy_routing_stub_count += 1
+    return {
+        "backend_mix": backend_mix,
+        "routing_policy": {
+            "mode": first_metadata.get("policy_mode", "unknown"),
+            "max_live_workers": first_metadata.get("max_live_workers", first_metadata.get("live_worker_limit", 0)),
+            "fallback_allowed": first_metadata.get("fallback_allowed", False),
+            "source": first_metadata.get("policy_source", "unknown"),
+        },
+        "fallback_used": any(result.fallback_used for result in results),
+        "policy_routing_stub_count": policy_routing_stub_count,
+        "fallback_stub_count": fallback_stub_count,
+    }
+
+
+def _routing_lines(routing: dict) -> list[str]:
+    policy = routing.get("routing_policy", {})
+    mix = routing.get("backend_mix", {})
+    return [
+        f"policy mode: {policy.get('mode', 'unknown')}",
+        f"max live workers: {policy.get('max_live_workers', 'unknown')}",
+        f"fallback allowed: {policy.get('fallback_allowed', 'unknown')}",
+        f"policy source: {policy.get('source', 'unknown')}",
+        f"live WorkerResults: {mix.get('live', 0)}",
+        f"stub WorkerResults: {mix.get('stub', 0)}",
+        f"policy routing stub count: {routing.get('policy_routing_stub_count', 0)}",
+        f"fallback stub count: {routing.get('fallback_stub_count', 0)}",
+    ]
