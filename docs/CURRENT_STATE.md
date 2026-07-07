@@ -68,6 +68,7 @@ S-14 Controlled Live-22 Retry Trial completed with PARTIAL quality: run_id `run-
 S-15 Retry Backoff / Jitter / Retry Budget Policy completed with PASS-candidate tests: max retry attempts increased from 1 to 2 for retryable transient errors; retryable errors remain timeout, API 503 high demand, API 500 internal error, and API 429 rate limit; auth, schema, and invalid model response errors are not retried; backoff defaults to 5s and 15s with small jitter; tests inject fake sleep and jitter; retry budget defaults to 5 retried workers per run; successful workers are not rerun; retry preserves key_slot; API key values are not recorded; live-limit 22 remains a capacity/retry trial result, not a baseline.
 S-16 Controlled Live-22 Backoff Retry Trial completed with PARTIAL quality: run_id `run-20260707-135313`, timeout 300s, limited_live live-limit 22, preflight live 22 / stub 0 / fallback 0, actual live 13 / stub 9 / fallback 9, available key slots 22, assigned key slots 1-22, distinct key slots used 22, single-key mode NO, max retry attempts 2, backoff and jitter enabled, retry budget 5 workers per run, retryable error count 11, retried worker count 5, retry success count 2, retry failure count 3, fallback after retry count 3, retry budget exhausted count 6, fallback causes API 503 high demand and API 500 internal error, baseline unchanged at live-limit 5 with timeout 300s, raw artifacts ignored and not committed.
 S-17 Live Concurrency Wave Policy completed with PASS-candidate tests: wave policy can limit simultaneous live calls while preserving target live workers; `python -m tlh route-dry-run` supports `--live-wave-size`; worker_count 22 with live-limit 22 and wave-size 11 plans two waves with max concurrent live workers 11; key slots 1-22 remain distinctly assigned; WorkerResult, FinalPacket, and CodexPrompt summaries include wave metadata; successful workers are not rerun; retry remains worker-targeted and preserves key_slot; no actual live-22 wave run was executed; live-limit 22 remains a capacity/wave trial result, not a baseline.
+S-18 Controlled Live-22 Wave Trial completed with FAIL-candidate quality: run_id `run-20260707-170719`, timeout 300s, limited_live live-limit 22, live-wave-size 11, preflight live 22 / stub 0 / fallback 0, wave-count 2, max concurrent live workers 11, actual live 10 / stub 12 / fallback 12, available key slots 22, assigned key slots 1-22, distinct key slots used 22, single-key mode NO, max retry attempts 2, backoff and jitter enabled, retry budget 5 workers per run, retryable error count 14, retried worker count 5, retry success count 2, retry failure count 3, fallback after retry count 3, retry budget exhausted count 9, fallback causes API 500 internal error and API 503 high demand, comparison vs S-16 worse, baseline unchanged at live-limit 5 with timeout 300s, raw artifacts ignored and not committed.
 
 The MVP currently proves the following flow with stub workers.
 
@@ -185,7 +186,7 @@ The approved baseline is live-limit 5 with `TLH_GEMMA_TIMEOUT_SECONDS=300`.
 python -m tlh route-dry-run --workers 11 --mode limited_live --live-limit 5
 ```
 
-The next controlled scaling decision should use route-dry-run wave preflight before any further explicitly approved live-limit 22 run, because S-17 can plan live-limit 22 as smaller live concurrency waves without promoting it to baseline.
+The next controlled scaling decision should not repeat wave-size 11 as the assumed fix. S-18 showed wave-size 11 was worse than S-16 under the same live-limit 22 and retry budget, so the next explicitly approved trial should either use smaller waves such as 5 or 6, reduce retry pressure, or add clearer per-wave pacing before another live-limit 22 attempt.
 
 ---
 
@@ -241,6 +242,7 @@ S-14 shows live-limit 22 is still transient-sensitive even with one targeted ret
 S-15 improves retry resilience with two attempts, backoff, jitter, and a retry budget, but does not promote live-limit 22 to baseline.
 S-16 shows live-limit 22 is still not stable under the current retry budget; do not promote live-limit 22 to baseline.
 S-17 adds wave concurrency planning for live-limit 22, but does not promote live-limit 22 to baseline.
+S-18 shows live-limit 22 with wave-size 11 is not stable and was worse than S-16 on live count, fallback count, retryable error count, and retry budget exhaustion; do not promote live-limit 22 or wave-size 11 to baseline.
 
 Later decisions.
 
@@ -279,7 +281,7 @@ MinimalityCheck notes
 ## Recommended Next Slice
 
 ```text
-Run another live-limit 22 trial only with explicit approval and route-dry-run wave preflight, for example `--live-wave-size 11`, to validate whether lower live concurrency reduces API-side pressure.
+Run another live-limit 22 trial only with explicit approval and route-dry-run wave preflight. Do not reuse `--live-wave-size 11` as the default next step; prefer a smaller wave size or additional per-wave pacing because S-18 worsened API-side pressure.
 Keep API key values out of output, notes, logs, and commits.
 ```
 
