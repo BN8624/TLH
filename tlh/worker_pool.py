@@ -1,11 +1,127 @@
-# MVP용 worker 실행 인터페이스와 stub worker를 제공한다.
+# worker backend 선택과 stub/live WorkerResult 생성을 관리한다.
 
 from __future__ import annotations
 
+import json
+import os
+from typing import Callable, Mapping
+
+from . import gemma_client
 from .schemas import TaskCard, WorkerResult
 
 
-def run_worker(card: TaskCard) -> WorkerResult:
+class WorkerBackendError(RuntimeError):
+    pass
+
+
+GemmaGenerate = Callable[[str], gemma_client.GemmaResponse]
+
+
+def run_worker(card: TaskCard, env: Mapping[str, str] | None = None, live_generate: GemmaGenerate | None = None) -> WorkerResult:
+    env = env or os.environ
+    mode = _backend_mode(env)
+    live_generate = live_generate or gemma_client.generate
+
+    if mode == "stub":
+        return _stub_result(card, backend="stub")
+
+    if mode == "auto" and not gemma_client.is_configured(env):
+        return _stub_result(card, backend="stub", fallback_used=True, error="Live Gemma is not configured; auto used stub.")
+
+    if mode not in {"live", "auto"}:
+        return _stub_result(card, backend="stub", fallback_used=True, error=f"Unsupported backend `{mode}`; used stub.")
+
+    prompt = gemma_client.build_worker_prompt(card)
+    response = live_generate(prompt)
+    if response.success:
+        return _normalize_live_result(card, response)
+
+    error = _redact_error(response.error, env)
+    fallback = _fallback_enabled(env, default=(mode == "auto"))
+    if fallback:
+        return _stub_result(card, backend="stub", fallback_used=True, error=error)
+    raise WorkerBackendError(error or "Live Gemma worker failed.")
+
+
+def _backend_mode(env: Mapping[str, str]) -> str:
+    return env.get("TLH_WORKER_BACKEND", "stub").strip().lower() or "stub"
+
+
+def _fallback_enabled(env: Mapping[str, str], default: bool) -> bool:
+    raw = env.get("TLH_GEMMA_FALLBACK_TO_STUB")
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _redact_error(error: str, env: Mapping[str, str]) -> str:
+    api_key = env.get("TLH_GEMMA_API_KEY", "")
+    if api_key:
+        return error.replace(api_key, "[REDACTED]")
+    return error
+
+
+def _normalize_live_result(card: TaskCard, response: gemma_client.GemmaResponse) -> WorkerResult:
+    data = _parse_live_text(response.text)
+    missing: list[str] = []
+
+    summary = str(data.get("summary") or "").strip()
+    if not summary:
+        summary = f"live-generated result for {card.title}"
+        missing.append("summary")
+
+    findings = _list_field(data, "findings")
+    if not findings:
+        findings = [line for line in response.text.splitlines() if line.strip()] or [summary]
+        missing.append("findings")
+
+    risks = _list_field(data, "risks")
+    assumptions = _list_field(data, "assumptions")
+    open_questions = _list_field(data, "open_questions")
+    attach_notes = _list_field(data, "attach_notes")
+    if not attach_notes:
+        attach_notes = [f"target: {card.attach_point or 'FinalPacket.Scope'} | content: Live result normalized for merge."]
+        missing.append("attach_notes")
+
+    if missing:
+        assumptions.append(f"normalized_missing_fields: {', '.join(missing)}")
+
+    return WorkerResult(
+        task_id=card.task_id,
+        worker_id=f"live-{card.worker_role}",
+        summary=summary,
+        findings=findings,
+        risks=risks,
+        assumptions=assumptions,
+        open_questions=open_questions,
+        attach_notes=attach_notes,
+        stub_generated=False,
+        live_generated=True,
+        backend="live",
+        model=response.model,
+        fallback_used=False,
+        error="",
+    )
+
+
+def _parse_live_text(text: str) -> dict:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _list_field(data: dict, key: str) -> list[str]:
+    value = data.get(key, [])
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    return []
+
+
+def _stub_result(card: TaskCard, backend: str, fallback_used: bool = False, error: str = "") -> WorkerResult:
     if card.merge_key == "s2_scope":
         findings = [
             "scope: Add a live Gemma adapter behind the existing `tlh.gemma_client` boundary.",
@@ -72,14 +188,23 @@ def run_worker(card: TaskCard) -> WorkerResult:
             "target: FinalPacket.Scope | content: Attach scope to the final packet.",
             "target: FinalPacket.ExecutionSteps | content: Attach execution steps.",
         ]
+
+    assumptions = ["stub_generated: true", "No live model configured for MVP skeleton."]
+    if fallback_used:
+        assumptions.append("fallback_used: true")
     return WorkerResult(
         task_id=card.task_id,
         worker_id=f"stub-{card.worker_role}",
         summary=f"stub-generated {card.worker_role} result for {card.title}",
         findings=findings,
         risks=risks,
-        assumptions=["stub_generated: true", "No live model configured for MVP skeleton."],
+        assumptions=assumptions,
         open_questions=[],
         attach_notes=attach_notes,
         stub_generated=True,
+        live_generated=False,
+        backend=backend,
+        model="",
+        fallback_used=fallback_used,
+        error=error,
     )

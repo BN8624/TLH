@@ -7,7 +7,7 @@ TLH MVP skeleton is implemented.
 S-0 stabilization is complete.
 S-1 stub dry run completed with PARTIAL quality.
 S-1Q merge and final quality fix completed with PASS quality.
-Live Gemma is not integrated yet.
+S-2 live Gemma adapter is implemented with stub-safe fallback.
 
 The project direction is defined.
 AICO is deprecated and must not be used as the architecture base.
@@ -45,7 +45,7 @@ docs\TLH_IMPLEMENTATION_PROMPT.md
 
 ## Current Goal
 
-Prepare for S-2 live Gemma adapter work without adding live calls yet.
+Prepare for S-3 controlled one-live-worker run.
 
 The MVP currently proves the following flow with stub workers.
 
@@ -88,6 +88,10 @@ Temporary-workspace smoke test.
 Quality tests for handoff outputs.
 Section-mapped MergePacket material.
 Structured FinalPacket and CodexPrompt rendering.
+Env-based worker backend selection.
+Live Gemma adapter with lazy SDK import.
+Stub fallback for missing or failed live configuration.
+Mock live adapter tests.
 ```
 
 Excluded.
@@ -104,7 +108,7 @@ GitHub PR/merge automation.
 Global AGENTS.md management.
 Global CLAUDE.md management.
 AI_WORKFLOW_KIT duplicate tooling.
-Live Gemma worker adapter.
+Unapproved real live worker smoke.
 ```
 
 ---
@@ -133,10 +137,10 @@ No README is required for now because this is a solo project.
 
 ## Next Action
 
-Choose the S-2 implementation path.
+Choose whether to run S-3 controlled one-live-worker smoke.
 
 ```text
-S-2 live Gemma adapter.
+S-3 controlled one-live-worker run.
 ```
 
 ---
@@ -163,7 +167,7 @@ Do not duplicate AI_WORKFLOW_KIT global features.
 
 ## Open Decisions
 
-No blocking decision for S-2 planning.
+User approval is required before any real live worker smoke.
 
 Later decisions.
 
@@ -203,8 +207,8 @@ MinimalityCheck notes
 ## Recommended Next Slice
 
 ```text
-Implement S-2 live Gemma adapter behind environment-variable configuration.
-Preserve stub fallback and WorkerResult schema.
+Run one controlled live worker with `TLH_WORKER_BACKEND=live` only after user approval.
+Keep API key values out of output, notes, logs, and commits.
 ```
 
 ---

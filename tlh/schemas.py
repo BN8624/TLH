@@ -36,6 +36,11 @@ class WorkerResult:
     open_questions: list[str] = field(default_factory=list)
     attach_notes: list[str] = field(default_factory=list)
     stub_generated: bool = True
+    live_generated: bool = False
+    backend: str = "stub"
+    model: str = ""
+    fallback_used: bool = False
+    error: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

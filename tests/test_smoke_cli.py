@@ -15,6 +15,7 @@ def run_tlh(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_ROOT)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["TLH_WORKER_BACKEND"] = "stub"
     return subprocess.run(
         [sys.executable, "-m", "tlh", *args],
         cwd=cwd,
