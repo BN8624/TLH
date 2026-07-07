@@ -19,7 +19,7 @@ GemmaGenerate = Callable[[str], gemma_client.GemmaResponse]
 
 def run_worker(card: TaskCard, env: Mapping[str, str] | None = None, live_generate: GemmaGenerate | None = None) -> WorkerResult:
     env = env or os.environ
-    mode = _backend_mode(env)
+    mode = _backend_mode(card, env)
     live_generate = live_generate or gemma_client.generate
 
     if mode == "stub":
@@ -43,7 +43,10 @@ def run_worker(card: TaskCard, env: Mapping[str, str] | None = None, live_genera
     raise WorkerBackendError(error or "Live Gemma worker failed.")
 
 
-def _backend_mode(env: Mapping[str, str]) -> str:
+def _backend_mode(card: TaskCard, env: Mapping[str, str]) -> str:
+    hint = card.backend_hint.strip().lower()
+    if hint:
+        return hint
     return env.get("TLH_WORKER_BACKEND", "stub").strip().lower() or "stub"
 
 
@@ -70,7 +73,7 @@ def _normalize_live_result(card: TaskCard, response: gemma_client.GemmaResponse)
         summary = f"live-generated result for {card.title}"
         missing.append("summary")
 
-    findings = _list_field(data, "findings")
+    findings = _findings_field(data)
     if not findings:
         findings = [line for line in response.text.splitlines() if line.strip()] or [summary]
         missing.append("findings")
@@ -105,11 +108,70 @@ def _normalize_live_result(card: TaskCard, response: gemma_client.GemmaResponse)
 
 
 def _parse_live_text(text: str) -> dict:
+    text = _extract_json_text(text)
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _extract_json_text(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+    if stripped.startswith("{"):
+        return stripped
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start != -1 and end > start:
+        return stripped[start : end + 1]
+    return stripped
+
+
+def _findings_field(data: dict) -> list[str]:
+    value = data.get("findings", [])
+    if isinstance(value, dict):
+        return _sectioned_findings(value)
+    return _list_field(data, "findings")
+
+
+def _sectioned_findings(values: dict) -> list[str]:
+    prefixes = {
+        "scope": "scope",
+        "non_goal": "non_goal",
+        "non_goals": "non_goal",
+        "files_to_inspect": "file",
+        "file": "file",
+        "files": "file",
+        "backend_selection_policy": "env",
+        "backend_policy": "env",
+        "one_live_worker_validation_plan": "step",
+        "validation_plan": "step",
+        "fallback_behavior": "fallback",
+        "secret_handling": "secret",
+        "verification_commands": "verification",
+        "verification": "verification",
+        "report_format": "report",
+        "implementation_steps": "step",
+        "expected_changes": "change",
+        "safety_rules": "safety",
+    }
+    findings: list[str] = []
+    for raw_key, raw_value in values.items():
+        prefix = prefixes.get(str(raw_key).strip().lower(), str(raw_key).strip().lower())
+        if isinstance(raw_value, list):
+            findings.extend(f"{prefix}: {item}" for item in raw_value if str(item).strip())
+        elif isinstance(raw_value, dict):
+            findings.extend(f"{prefix}: {key}: {value}" for key, value in raw_value.items() if str(value).strip())
+        elif str(raw_value).strip():
+            findings.append(f"{prefix}: {raw_value}")
+    return findings
 
 
 def _list_field(data: dict, key: str) -> list[str]:
@@ -141,6 +203,27 @@ def _stub_result(card: TaskCard, backend: str, fallback_used: bool = False, erro
             "target: FinalPacket.OutOfScope | content: Do not add GUI, MCP write, RTK hook, or AI_WORKFLOW_KIT duplication.",
             "target: FinalPacket.FilesToInspect | content: Inspect gemma_client, worker_pool, dispatcher, tests, and prompts.",
             "target: FinalPacket.ExpectedChanges | content: Preserve stub fallback and WorkerResult schema.",
+        ]
+    elif card.merge_key == "s3_safety_verification":
+        findings = [
+            "non_goal: Do not implement full live rollout, multiple live workers, GUI, dashboard, Obsidian MCP write, RTK hook, or AI_WORKFLOW_KIT duplication.",
+            "file: Inspect `docs/TLH_INDEX.md`, `docs/CURRENT_STATE.md`, `tlh/team_lead.py`, `tlh/dispatcher.py`, `tlh/worker_pool.py`, and `tests/test_live_adapter.py`.",
+            "env: Use `TLH_GEMMA_API_KEY`, `TLH_GEMMA_MODEL`, `TLH_WORKER_BACKEND`, `TLH_GEMMA_FALLBACK_TO_STUB`, `TLH_GEMMA_TIMEOUT_SECONDS`, and `TLH_GEMMA_MAX_OUTPUT_TOKENS`.",
+            "secret: Load API keys only into the current process, never print values, prefixes, lengths, or raw env dumps.",
+            "fallback: Record `fallback_used` explicitly on every WorkerResult path.",
+            "verification: Run `python -m compileall tlh`, `python -m pytest`, `python -m tlh --help`, and `python -m tlh init`.",
+            "report: Include backend mix, fallback status, schema quality, merge quality, final prompt usability, safety, commit hash, and push status.",
+            "safety: Commit only source and review docs; keep raw run artifacts ignored.",
+        ]
+        risks = [
+            "A live WorkerResult may require normalization if the model emits prose instead of JSON.",
+            "Global backend settings can accidentally turn all workers live unless per-card backend hints are honored.",
+        ]
+        attach_notes = [
+            "target: FinalPacket.OutOfScope | content: Attach forbidden integrations and rollout boundaries.",
+            "target: FinalPacket.SecretHandling | content: Attach key handling rules.",
+            "target: FinalPacket.Verification | content: Attach concrete verification commands.",
+            "target: FinalPacket.ReportFormat | content: Attach required S-3 report fields.",
         ]
     elif card.merge_key == "s2_safety_verification":
         findings = [

@@ -8,6 +8,7 @@ S-0 stabilization is complete.
 S-1 stub dry run completed with PARTIAL quality.
 S-1Q merge and final quality fix completed with PASS quality.
 S-2 live Gemma adapter is implemented with stub-safe fallback.
+S-3 controlled one-live-worker run completed with PASS quality.
 
 The project direction is defined.
 AICO is deprecated and must not be used as the architecture base.
@@ -45,9 +46,9 @@ docs\TLH_IMPLEMENTATION_PROMPT.md
 
 ## Current Goal
 
-Prepare for S-3 controlled one-live-worker run.
+Prepare for the next controlled multi-live dry run.
 
-S-3 is currently blocked because `TLH_GEMMA_API_KEY` was not present in the shell environment during the first S-3 preflight.
+S-3 proved that one TaskCard can run live with `gemma-4-31b-it` while the remaining TaskCard stays stub-safe.
 
 The MVP currently proves the following flow with stub workers.
 
@@ -92,8 +93,11 @@ Section-mapped MergePacket material.
 Structured FinalPacket and CodexPrompt rendering.
 Env-based worker backend selection.
 Live Gemma adapter with lazy SDK import.
+Per-TaskCard backend hints for one-live-worker validation.
+Fenced JSON live output normalization.
 Stub fallback for missing or failed live configuration.
 Mock live adapter tests.
+One-live-worker live dry run review.
 ```
 
 Excluded.
@@ -110,7 +114,7 @@ GitHub PR/merge automation.
 Global AGENTS.md management.
 Global CLAUDE.md management.
 AI_WORKFLOW_KIT duplicate tooling.
-Unapproved real live worker smoke.
+Unbounded real live worker rollout.
 ```
 
 ---
@@ -139,10 +143,10 @@ No README is required for now because this is a solo project.
 
 ## Next Action
 
-Rerun S-3 controlled one-live-worker smoke only after the API key is present in the current shell.
+Run a controlled multi-live dry run only after setting an explicit live-worker count limit.
 
 ```text
-S-3 controlled one-live-worker run.
+S-4 controlled multi-live dry run.
 ```
 
 ---
@@ -169,12 +173,11 @@ Do not duplicate AI_WORKFLOW_KIT global features.
 
 ## Open Decisions
 
-User approval is required before any real live worker smoke.
+User approval is required before increasing the live worker count.
 
 Later decisions.
 
 ```text
-Whether to use live Gemma workers or stub workers first.
 Where to store API key configuration.
 Whether Serena read/search should be integrated after MVP.
 Whether Obsidian MCP read-only should be considered after MVP.
@@ -209,7 +212,7 @@ MinimalityCheck notes
 ## Recommended Next Slice
 
 ```text
-Run one controlled live worker with `TLH_WORKER_BACKEND=live` only after user approval.
+Run a controlled multi-live dry run with an explicit live-worker count limit.
 Keep API key values out of output, notes, logs, and commits.
 ```
 

@@ -25,6 +25,36 @@ def task_card() -> TaskCard:
     )
 
 
+def test_backend_hint_overrides_global_stub_for_one_card() -> None:
+    live_card = task_card()
+    live_card.backend_hint = "live"
+    stub_card = task_card()
+    stub_card.task_id = "T-stub"
+
+    response_text = json.dumps(
+        {
+            "summary": "Live summary.",
+            "findings": ["scope: Only this card is live."],
+            "risks": [],
+            "assumptions": [],
+            "open_questions": [],
+            "attach_notes": ["target: FinalPacket.Scope | content: Only this card is live."],
+        }
+    )
+
+    def fake_generate(_prompt: str) -> gemma_client.GemmaResponse:
+        return gemma_client.GemmaResponse(success=True, text=response_text, model="mock-gemma")
+
+    env = {"TLH_WORKER_BACKEND": "stub", "TLH_GEMMA_API_KEY": "SECRET_VALUE"}
+    live_result = run_worker(live_card, env=env, live_generate=fake_generate)
+    stub_result = run_worker(stub_card, env=env, live_generate=fake_generate)
+
+    assert live_result.backend == "live"
+    assert live_result.live_generated is True
+    assert stub_result.backend == "stub"
+    assert stub_result.stub_generated is True
+
+
 def test_stub_backend_forces_stub_without_key() -> None:
     result = run_worker(task_card(), env={"TLH_WORKER_BACKEND": "stub"})
 
@@ -103,6 +133,39 @@ def test_incomplete_live_response_is_normalized() -> None:
     assert result.findings
     assert result.attach_notes
     assert any("normalized_missing_fields" in item for item in result.assumptions)
+
+
+def test_fenced_live_json_with_sectioned_findings_maps_to_merge_prefixes() -> None:
+    response_text = """```json
+{
+  "summary": "Live structured summary.",
+  "findings": {
+    "scope": "Use one live worker.",
+    "non_goals": ["Do not run multiple live workers."],
+    "files_to_inspect": ["tlh/worker_pool.py"],
+    "verification_commands": ["python -m pytest"]
+  },
+  "risks": [],
+  "assumptions": [],
+  "open_questions": [],
+  "attach_notes": ["target: FinalPacket.Scope | content: Use one live worker."]
+}
+```"""
+
+    def fake_generate(_prompt: str) -> gemma_client.GemmaResponse:
+        return gemma_client.GemmaResponse(success=True, text=response_text, model="mock-gemma")
+
+    result = run_worker(
+        task_card(),
+        env={"TLH_WORKER_BACKEND": "live", "TLH_GEMMA_API_KEY": "SECRET_VALUE"},
+        live_generate=fake_generate,
+    )
+
+    assert result.summary == "Live structured summary."
+    assert "scope: Use one live worker." in result.findings
+    assert "non_goal: Do not run multiple live workers." in result.findings
+    assert "file: tlh/worker_pool.py" in result.findings
+    assert "verification: python -m pytest" in result.findings
 
 
 def test_live_error_redacts_api_key_when_falling_back() -> None:

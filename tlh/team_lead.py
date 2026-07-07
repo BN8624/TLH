@@ -24,6 +24,44 @@ def concrete_mission(mission: str, answers: str) -> str:
 
 def decompose(run_id: str, mission: str, answers: str) -> list[TaskCard]:
     concrete = concrete_mission(mission, answers)
+    if "one live" in concrete.lower() or "one-live-worker" in concrete.lower():
+        return [
+            TaskCard(
+                task_id=f"{run_id}-T001",
+                run_id=run_id,
+                loop_index=0,
+                title="Draft the controlled multi-worker live rollout handoff",
+                goal=(
+                    "Produce the scope, non-goals, files to inspect, backend selection policy, "
+                    "one-live-worker validation plan, fallback behavior, secret handling, "
+                    "verification commands, and report format for a future controlled multi-worker live rollout."
+                ),
+                worker_role="builder",
+                input_context=[concrete],
+                expected_output="section-mapped findings for an executable Codex handoff prompt.",
+                attach_point="FinalPacket.Scope",
+                merge_key="s3_one_live_scope",
+                topology_hint="parallel",
+                backend_hint="live",
+            ),
+            TaskCard(
+                task_id=f"{run_id}-T002",
+                run_id=run_id,
+                loop_index=0,
+                title="Review S-3 one-live-worker safety and quality",
+                goal=(
+                    "Keep the run stub-safe by checking fallback behavior, secret handling, "
+                    "verification commands, report format, and non-goals without adding multiple live workers."
+                ),
+                worker_role="critic",
+                input_context=[concrete],
+                expected_output="section-mapped safety, verification, and quality findings.",
+                attach_point="FinalPacket.Verification",
+                dependencies=[f"{run_id}-T001"],
+                merge_key="s3_safety_verification",
+                topology_hint="parallel",
+            ),
+        ]
     return [
         TaskCard(
             task_id=f"{run_id}-T001",

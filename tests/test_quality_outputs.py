@@ -65,6 +65,7 @@ def test_handoff_quality_outputs_are_sectioned(tmp_path: Path) -> None:
     assert "## Scope" in final_packet
     assert "## Out of Scope" in final_packet
     assert "## Verification" in final_packet
+    assert "## Scope" in codex_prompt
     assert "## Non-goals" in codex_prompt
     assert "## Verification Commands" in codex_prompt
     assert "## Report Format" in codex_prompt

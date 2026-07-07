@@ -17,7 +17,7 @@ def save_task_cards(root: Path, run_id: str, cards: list[TaskCard]) -> None:
             note_meta("task_card", card.task_id, run_id),
             {
                 "Purpose": card.goal,
-                "Current State": f"Assigned to worker role `{card.worker_role}`.",
+                "Current State": f"Assigned to worker role `{card.worker_role}` with backend hint `{card.backend_hint or 'default'}`.",
                 "Inputs": markdown_list(card.input_context),
                 "Outputs": card.expected_output,
                 "Links": f"- PRODUCES: [[{card.task_id}-result]]",

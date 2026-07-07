@@ -20,6 +20,7 @@ class TaskCard:
     dependencies: list[str] = field(default_factory=list)
     merge_key: str = ""
     topology_hint: str = ""
+    backend_hint: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
