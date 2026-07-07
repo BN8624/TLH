@@ -49,9 +49,64 @@ class LiveRoutingDecision:
         return data
 
 
+@dataclass
+class LiveRoutingSimulation:
+    worker_count: int
+    policy: LiveRoutingPolicy
+    decisions: list[LiveRoutingDecision]
+
+    def backend_mix(self) -> dict[str, int]:
+        return {
+            "live": sum(1 for decision in self.decisions if decision.selected_backend == "live"),
+            "stub": sum(1 for decision in self.decisions if decision.selected_backend == "stub"),
+            "fallback": sum(1 for decision in self.decisions if decision.fallback_used),
+        }
+
+    def guards(self) -> dict[str, bool]:
+        mix = self.backend_mix()
+        force_live_requested = any(
+            decision.routing_source == "env:TLH_FORCE_WORKER_BACKEND+policy" for decision in self.decisions
+        )
+        return {
+            "force_live_bypassed_limit": force_live_requested and mix["live"] > self.policy.max_live_workers,
+            "force_live_implied_full_live": force_live_requested and self.policy.mode == "full_live",
+            "full_live_requires_explicit_opt_in": True,
+        }
+
+    def to_dict(self) -> dict:
+        return {
+            "worker_count": self.worker_count,
+            "policy": {
+                "mode": self.policy.mode,
+                "max_live_workers": self.policy.max_live_workers,
+                "source": self.policy.source,
+                "full_live_enabled": self.policy.mode == "full_live",
+                "allow_full_live": self.policy.mode == "full_live" and "TLH_ALLOW_FULL_LIVE" in self.policy.source,
+                "reason": self.policy.reason,
+            },
+            "backend_mix": self.backend_mix(),
+            "guards": self.guards(),
+            "decisions": [
+                {
+                    "worker_index": decision.worker_index,
+                    "requested_backend": decision.requested_backend,
+                    "selected_backend": decision.selected_backend,
+                    "reason": decision.routing_reason,
+                    "source": decision.routing_source,
+                    "live_worker_index": decision.live_worker_index,
+                    "fallback_used": decision.fallback_used,
+                }
+                for decision in self.decisions
+            ],
+        }
+
+
 def build_live_routing_policy(env: Mapping[str, str]) -> LiveRoutingPolicy:
     raw_mode = env.get("TLH_LIVE_ROUTING_MODE", "").strip().lower()
     raw_limit = env.get("TLH_LIVE_WORKER_LIMIT", "").strip()
+    mode_source = env.get("TLH_LIVE_ROUTING_MODE_SOURCE", "env:TLH_LIVE_ROUTING_MODE")
+    limit_source = env.get("TLH_LIVE_WORKER_LIMIT_SOURCE", "env:TLH_LIVE_WORKER_LIMIT")
+    full_live_source = env.get("TLH_ALLOW_FULL_LIVE_SOURCE", "TLH_ALLOW_FULL_LIVE")
     allow_fallback = _truthy(env.get("TLH_GEMMA_FALLBACK_TO_STUB"), default=True)
 
     if raw_mode == "full_live" and not _truthy(env.get("TLH_ALLOW_FULL_LIVE"), default=False):
@@ -61,7 +116,7 @@ def build_live_routing_policy(env: Mapping[str, str]) -> LiveRoutingPolicy:
             require_explicit_live=True,
             allow_fallback=allow_fallback,
             cost_guard_enabled=True,
-            source="env:TLH_LIVE_ROUTING_MODE",
+            source=mode_source,
             reason="full_live requires explicit opt-in; downgraded to one_live",
         )
 
@@ -72,7 +127,7 @@ def build_live_routing_policy(env: Mapping[str, str]) -> LiveRoutingPolicy:
             require_explicit_live=False,
             allow_fallback=allow_fallback,
             cost_guard_enabled=True,
-            source="env:TLH_LIVE_ROUTING_MODE",
+            source=mode_source,
             reason="stub_only policy selected",
         )
 
@@ -84,7 +139,7 @@ def build_live_routing_policy(env: Mapping[str, str]) -> LiveRoutingPolicy:
             require_explicit_live=False,
             allow_fallback=allow_fallback,
             cost_guard_enabled=True,
-            source="env:TLH_LIVE_WORKER_LIMIT",
+            source=limit_source,
             reason=f"live worker limit set to {limit}",
         )
 
@@ -95,7 +150,7 @@ def build_live_routing_policy(env: Mapping[str, str]) -> LiveRoutingPolicy:
             require_explicit_live=False,
             allow_fallback=allow_fallback,
             cost_guard_enabled=True,
-            source="env:TLH_LIVE_ROUTING_MODE",
+            source=mode_source,
             reason="one_live policy selected",
         )
 
@@ -106,7 +161,7 @@ def build_live_routing_policy(env: Mapping[str, str]) -> LiveRoutingPolicy:
             require_explicit_live=True,
             allow_fallback=allow_fallback,
             cost_guard_enabled=False,
-            source="env:TLH_LIVE_ROUTING_MODE+TLH_ALLOW_FULL_LIVE",
+            source=f"{mode_source}+{full_live_source}",
             reason="full_live explicitly enabled",
         )
 
@@ -200,6 +255,25 @@ def decide_worker_backend(
         reason=reason,
         source="env:TLH_FORCE_WORKER_BACKEND+policy" if force_live_requested else policy.source,
     )
+
+
+def simulate_routing_decisions(worker_count: int, env: Mapping[str, str], requested: str | None = None) -> LiveRoutingSimulation:
+    policy = build_live_routing_policy(env)
+    live_workers_used = 0
+    decisions: list[LiveRoutingDecision] = []
+    requested_backend_value = requested or env.get("TLH_WORKER_BACKEND", "auto").strip().lower() or "auto"
+    for worker_index in range(worker_count):
+        decision = decide_worker_backend(
+            worker_index=worker_index,
+            requested=requested_backend_value,
+            live_workers_used=live_workers_used,
+            policy=policy,
+            env=env,
+        )
+        if decision.selected_backend == "live":
+            live_workers_used += 1
+        decisions.append(decision)
+    return LiveRoutingSimulation(worker_count=worker_count, policy=policy, decisions=decisions)
 
 
 def _decision(

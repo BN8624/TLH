@@ -12,6 +12,7 @@ S-3 controlled one-live-worker run completed with PASS quality.
 S-4 controlled multi-live limit dry run completed with PASS quality.
 S-5 controlled live-worker routing policy is implemented with PASS-candidate tests.
 S-6 controlled routing policy dry run and guard hardening completed with PASS-candidate tests.
+S-7 routing policy dry-run CLI command is implemented with PASS-candidate tests.
 
 The project direction is defined.
 AICO is deprecated and must not be used as the architecture base.
@@ -49,12 +50,13 @@ docs\TLH_IMPLEMENTATION_PROMPT.md
 
 ## Current Goal
 
-Prepare for a CLI-visible routing dry-run command or a policy-only scale simulation.
+Prepare to use `route-dry-run` as a preflight before future live-worker scaling runs.
 
 S-3 proved that one TaskCard can run live with `gemma-4-31b-it` while the remaining TaskCard stays stub-safe.
 S-4 proved that two TaskCards can run live with `gemma-4-31b-it` while remaining TaskCards stay stub-safe under `TLH_LIVE_WORKER_LIMIT=2`.
 S-5 centralizes live/stub decisions in `tlh.live_routing` and records policy decisions in WorkerResult, MergePacket, FinalPacket, and CodexPrompt outputs.
 S-6 verifies worker counts 3, 5, and 11 without live API calls, hardens force-live so it cannot bypass live limits, and removes stale stub-only language from generated handoff outputs.
+S-7 adds `python -m tlh route-dry-run` for policy-only text and JSON routing previews without live API calls or run artifacts.
 
 The MVP currently proves the following flow with stub workers.
 
@@ -106,6 +108,7 @@ Centralized `LiveRoutingPolicy` and `LiveRoutingDecision`.
 FinalPacket and CodexPrompt backend mix and routing policy summaries.
 Force-live guard that treats `TLH_FORCE_WORKER_BACKEND=live` as a live request subject to policy.
 Routing dry-run coverage for worker counts 3, 5, and 11.
+CLI-visible `route-dry-run` command with text and JSON output.
 Fenced JSON live output normalization.
 Stub fallback for missing or failed live configuration.
 Mock live adapter tests.
@@ -113,6 +116,7 @@ One-live-worker live dry run review.
 Multi-live limit dry run review.
 Controlled live-worker routing policy review.
 Controlled routing dry run and guard hardening review.
+Routing policy dry-run command review.
 ```
 
 Excluded.
@@ -158,10 +162,10 @@ No README is required for now because this is a solo project.
 
 ## Next Action
 
-Add a CLI-visible routing dry-run command or run an S-7 policy-only scale simulation.
+Use the CLI-visible routing dry-run command before any future live-worker scaling run.
 
 ```text
-S-7 routing policy dry-run command or policy-only scale simulation.
+python -m tlh route-dry-run --workers 11 --mode limited_live --live-limit 2
 ```
 
 ---
@@ -229,7 +233,7 @@ MinimalityCheck notes
 ## Recommended Next Slice
 
 ```text
-Add a user-visible routing dry-run command that reports decisions without invoking live workers.
+Use `route-dry-run` as a preflight and add regression tests before any new routing mode.
 Keep API key values out of output, notes, logs, and commits.
 ```
 

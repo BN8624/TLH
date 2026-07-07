@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import dispatcher, graph_index, merge_harness, team_lead
+from .live_routing import simulate_routing_decisions
 from .loop_controller import decide
 from .packet_writer import frontmatter_note, markdown_list, read_json, read_jsonl, read_text, write_json, write_text
 from .schemas import FinalPacket
@@ -18,6 +21,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="tlh")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
+    route_parser = sub.add_parser("route-dry-run")
+    route_parser.add_argument("--workers", type=int, default=2)
+    route_parser.add_argument("--live-limit", type=int)
+    route_parser.add_argument("--mode", choices=["stub_only", "one_live", "limited_live", "full_live"])
+    route_parser.add_argument("--force-backend", choices=["stub", "live"])
+    route_parser.add_argument("--allow-full-live", action="store_true")
+    route_parser.add_argument("--json", action="store_true")
     run_parser = sub.add_parser("run")
     run_parser.add_argument("--mission", required=True)
     answer_parser = sub.add_parser("answer")
@@ -37,6 +47,8 @@ def main(argv: list[str] | None = None) -> int:
         created = init_project(root)
         print(f"initialized TLH structure; created {len(created)} paths")
         return 0
+    if args.command == "route-dry-run":
+        return _route_dry_run(args)
     init_project(root)
     if args.command == "run":
         return _run(root, Path(args.mission))
@@ -51,6 +63,72 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "finalize":
         return _finalize(root, args.run)
     return 1
+
+
+def _route_dry_run(args) -> int:
+    if args.workers <= 0:
+        raise SystemExit("--workers must be greater than 0")
+    env = os.environ.copy()
+    if args.mode:
+        env["TLH_LIVE_ROUTING_MODE"] = args.mode
+        env["TLH_LIVE_ROUTING_MODE_SOURCE"] = "cli:--mode"
+    if args.live_limit is not None:
+        env["TLH_LIVE_WORKER_LIMIT"] = str(args.live_limit)
+        env["TLH_LIVE_WORKER_LIMIT_SOURCE"] = "cli:--live-limit"
+    if args.force_backend:
+        env["TLH_FORCE_WORKER_BACKEND"] = args.force_backend
+    if args.allow_full_live:
+        env["TLH_ALLOW_FULL_LIVE"] = "1"
+        env["TLH_ALLOW_FULL_LIVE_SOURCE"] = "cli:--allow-full-live"
+    if "TLH_WORKER_BACKEND" not in env:
+        env["TLH_WORKER_BACKEND"] = "auto"
+    simulation = simulate_routing_decisions(args.workers, env, requested="live")
+    payload = simulation.to_dict()
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(_route_dry_run_text(payload, args.force_backend))
+    return 0
+
+
+def _route_dry_run_text(payload: dict, force_backend: str | None) -> str:
+    policy = payload["policy"]
+    mix = payload["backend_mix"]
+    guards = payload["guards"]
+    lines = [
+        "TLH Routing Policy Dry Run",
+        "",
+        f"worker_count: {payload['worker_count']}",
+        f"policy_mode: {policy['mode']}",
+        f"max_live_workers: {policy['max_live_workers']}",
+        f"force_backend: {force_backend or 'none'}",
+        f"full_live_enabled: {str(policy['full_live_enabled']).lower()}",
+        f"allow_full_live: {str(policy['allow_full_live']).lower()}",
+        "actual API call: NO",
+        "run artifacts created: NO",
+        "",
+        "backend_mix:",
+        f"- live: {mix['live']}",
+        f"- stub: {mix['stub']}",
+        f"- fallback: {mix['fallback']}",
+        "",
+        "guards:",
+        f"- force_live_bypasses_limit: {_yes_no(guards['force_live_bypassed_limit'])}",
+        f"- force_live_implies_full_live: {_yes_no(guards['force_live_implied_full_live'])}",
+        f"- full_live_requires_explicit_opt_in: {_yes_no(guards['full_live_requires_explicit_opt_in'])}",
+        "",
+        "decisions:",
+    ]
+    lines.extend(
+        f"- worker {decision['worker_index']}: requested={decision['requested_backend']} "
+        f"selected={decision['selected_backend']} reason=\"{decision['reason']}\""
+        for decision in payload["decisions"]
+    )
+    return "\n".join(lines)
+
+
+def _yes_no(value: bool) -> str:
+    return "YES" if value else "NO"
 
 
 def _new_run_id() -> str:
