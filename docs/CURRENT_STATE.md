@@ -47,6 +47,8 @@ docs\TLH_IMPLEMENTATION_PROMPT.md
 
 Prepare for S-3 controlled one-live-worker run.
 
+S-3 is currently blocked because `TLH_GEMMA_API_KEY` was not present in the shell environment during the first S-3 preflight.
+
 The MVP currently proves the following flow with stub workers.
 
 ```text
@@ -137,7 +139,7 @@ No README is required for now because this is a solo project.
 
 ## Next Action
 
-Choose whether to run S-3 controlled one-live-worker smoke.
+Rerun S-3 controlled one-live-worker smoke only after the API key is present in the current shell.
 
 ```text
 S-3 controlled one-live-worker run.
