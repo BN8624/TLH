@@ -23,27 +23,30 @@ def run_worker(card: TaskCard, env: Mapping[str, str] | None = None, live_genera
     live_generate = live_generate or gemma_client.generate
 
     if mode == "stub":
-        return _stub_result(card, backend="stub")
+        return _stub_result(card, backend="stub", env=env)
 
     if mode == "auto" and not gemma_client.is_configured(env):
-        return _stub_result(card, backend="stub", fallback_used=True, error="Live Gemma is not configured; auto used stub.")
+        return _stub_result(card, backend="stub", fallback_used=True, error="Live Gemma is not configured; auto used stub.", env=env)
 
     if mode not in {"live", "auto"}:
-        return _stub_result(card, backend="stub", fallback_used=True, error=f"Unsupported backend `{mode}`; used stub.")
+        return _stub_result(card, backend="stub", fallback_used=True, error=f"Unsupported backend `{mode}`; used stub.", env=env)
 
     prompt = gemma_client.build_worker_prompt(card)
     response = live_generate(prompt)
     if response.success:
-        return _normalize_live_result(card, response)
+        return _normalize_live_result(card, response, env)
 
     error = _redact_error(response.error, env)
     fallback = _fallback_enabled(env, default=(mode == "auto"))
     if fallback:
-        return _stub_result(card, backend="stub", fallback_used=True, error=error)
+        return _stub_result(card, backend="stub", fallback_used=True, error=error, env=env)
     raise WorkerBackendError(error or "Live Gemma worker failed.")
 
 
 def _backend_mode(card: TaskCard, env: Mapping[str, str]) -> str:
+    forced = env.get("TLH_FORCE_WORKER_BACKEND", "").strip().lower()
+    if forced:
+        return forced
     hint = card.backend_hint.strip().lower()
     if hint:
         return hint
@@ -64,7 +67,7 @@ def _redact_error(error: str, env: Mapping[str, str]) -> str:
     return error
 
 
-def _normalize_live_result(card: TaskCard, response: gemma_client.GemmaResponse) -> WorkerResult:
+def _normalize_live_result(card: TaskCard, response: gemma_client.GemmaResponse, env: Mapping[str, str]) -> WorkerResult:
     data = _parse_live_text(response.text)
     missing: list[str] = []
 
@@ -104,6 +107,7 @@ def _normalize_live_result(card: TaskCard, response: gemma_client.GemmaResponse)
         model=response.model,
         fallback_used=False,
         error="",
+        metadata=_worker_metadata(env, backend="live"),
     )
 
 
@@ -149,11 +153,19 @@ def _sectioned_findings(values: dict) -> list[str]:
         "files_to_inspect": "file",
         "file": "file",
         "files": "file",
+        "live_worker_limit_policy": "env",
+        "live_worker_limit": "env",
         "backend_selection_policy": "env",
+        "backend_selection_rules": "env",
         "backend_policy": "env",
+        "live_limit_validation_plan": "step",
+        "multi_live_validation_plan": "step",
         "one_live_worker_validation_plan": "step",
         "validation_plan": "step",
         "fallback_behavior": "fallback",
+        "rollback_or_failure_handling": "failure",
+        "rollback_failure_handling": "failure",
+        "rollback": "failure",
         "secret_handling": "secret",
         "verification_commands": "verification",
         "verification": "verification",
@@ -183,7 +195,13 @@ def _list_field(data: dict, key: str) -> list[str]:
     return []
 
 
-def _stub_result(card: TaskCard, backend: str, fallback_used: bool = False, error: str = "") -> WorkerResult:
+def _stub_result(
+    card: TaskCard,
+    backend: str,
+    fallback_used: bool = False,
+    error: str = "",
+    env: Mapping[str, str] | None = None,
+) -> WorkerResult:
     if card.merge_key == "s2_scope":
         findings = [
             "scope: Add a live Gemma adapter behind the existing `tlh.gemma_client` boundary.",
@@ -224,6 +242,28 @@ def _stub_result(card: TaskCard, backend: str, fallback_used: bool = False, erro
             "target: FinalPacket.SecretHandling | content: Attach key handling rules.",
             "target: FinalPacket.Verification | content: Attach concrete verification commands.",
             "target: FinalPacket.ReportFormat | content: Attach required S-3 report fields.",
+        ]
+    elif card.merge_key == "s4_limit_safety":
+        findings = [
+            "scope: Validate a controlled live-worker limit before any broader rollout.",
+            "non_goal: Do not allow unlimited live workers or full production rollout.",
+            "file: Inspect `tlh/dispatcher.py`, `tlh/worker_pool.py`, `tlh/schemas.py`, `tlh/team_lead.py`, and `tests/test_live_worker_limit.py`.",
+            "env: Set `TLH_LIVE_WORKER_LIMIT=2` to cap live workers for the run.",
+            "fallback: Cards beyond the live-worker limit must run as stub workers with `stub_generated: true`.",
+            "secret: Never print API key values, prefixes, lengths, or raw environment dumps.",
+            "verification: Run `python -m compileall tlh`, `python -m pytest`, `python -m tlh --help`, and `python -m tlh init`.",
+            "failure: If live quality regresses or fallback breaks, stop scaling and fix live limit metadata or merge quality first.",
+            "report: Include backend mix, live worker limit, fallback status, quality assessment, commit hash, and push status.",
+        ]
+        risks = [
+            "Live output may vary across two workers and require section mapping.",
+            "Limit metadata can drift if routing and WorkerResult creation are not kept together.",
+        ]
+        attach_notes = [
+            "target: FinalPacket.Scope | content: Attach controlled live-worker limit validation.",
+            "target: FinalPacket.StubFallback | content: Attach beyond-limit stub behavior.",
+            "target: FinalPacket.SecretHandling | content: Attach no-secret-output rule.",
+            "target: FinalPacket.ReportFormat | content: Attach S-4 reporting fields.",
         ]
     elif card.merge_key == "s2_safety_verification":
         findings = [
@@ -290,4 +330,22 @@ def _stub_result(card: TaskCard, backend: str, fallback_used: bool = False, erro
         model="",
         fallback_used=fallback_used,
         error=error,
+        metadata=_worker_metadata(env, backend=backend),
     )
+
+
+def _worker_metadata(env: Mapping[str, str] | None, backend: str) -> dict[str, int | str]:
+    env = env or {}
+    metadata: dict[str, int | str] = {"backend": backend}
+    if env.get("TLH_LIVE_WORKER_LIMIT"):
+        metadata["live_worker_limit"] = _int_metadata(env.get("TLH_LIVE_WORKER_LIMIT", "0"))
+    if backend == "live" and env.get("TLH_LIVE_WORKER_INDEX"):
+        metadata["live_worker_index"] = _int_metadata(env.get("TLH_LIVE_WORKER_INDEX", "0"))
+    return metadata
+
+
+def _int_metadata(raw: str) -> int:
+    try:
+        return int(raw)
+    except ValueError:
+        return 0

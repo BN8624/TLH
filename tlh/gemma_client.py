@@ -56,7 +56,8 @@ def build_worker_prompt(card: TaskCard) -> str:
         [
             "You are a TLH worker processing exactly one TaskCard.",
             "Do not write files. Do not run shell commands. Do not produce the final answer.",
-            "Return a JSON object with summary, findings, risks, assumptions, open_questions, and attach_notes.",
+            "Return only a concise JSON object. Do not wrap it in a markdown code fence.",
+            "Use summary, findings, risks, assumptions, open_questions, and attach_notes fields.",
             "",
             "TaskCard.",
             f"- task_id: {card.task_id}",

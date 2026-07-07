@@ -9,6 +9,7 @@ S-1 stub dry run completed with PARTIAL quality.
 S-1Q merge and final quality fix completed with PASS quality.
 S-2 live Gemma adapter is implemented with stub-safe fallback.
 S-3 controlled one-live-worker run completed with PASS quality.
+S-4 controlled multi-live limit dry run completed with PASS quality.
 
 The project direction is defined.
 AICO is deprecated and must not be used as the architecture base.
@@ -46,9 +47,10 @@ docs\TLH_IMPLEMENTATION_PROMPT.md
 
 ## Current Goal
 
-Prepare for the next controlled multi-live dry run.
+Prepare for a controlled live-worker scaling policy.
 
 S-3 proved that one TaskCard can run live with `gemma-4-31b-it` while the remaining TaskCard stays stub-safe.
+S-4 proved that two TaskCards can run live with `gemma-4-31b-it` while remaining TaskCards stay stub-safe under `TLH_LIVE_WORKER_LIMIT=2`.
 
 The MVP currently proves the following flow with stub workers.
 
@@ -94,10 +96,13 @@ Structured FinalPacket and CodexPrompt rendering.
 Env-based worker backend selection.
 Live Gemma adapter with lazy SDK import.
 Per-TaskCard backend hints for one-live-worker validation.
+Run-level live worker limit with `TLH_LIVE_WORKER_LIMIT`.
+WorkerResult metadata for `live_worker_limit` and `live_worker_index`.
 Fenced JSON live output normalization.
 Stub fallback for missing or failed live configuration.
 Mock live adapter tests.
 One-live-worker live dry run review.
+Multi-live limit dry run review.
 ```
 
 Excluded.
@@ -143,10 +148,10 @@ No README is required for now because this is a solo project.
 
 ## Next Action
 
-Run a controlled multi-live dry run only after setting an explicit live-worker count limit.
+Define a controlled live-worker scaling policy with an explicit count limit and rollback criteria.
 
 ```text
-S-4 controlled multi-live dry run.
+S-5 controlled live-worker scaling policy.
 ```
 
 ---
@@ -173,7 +178,7 @@ Do not duplicate AI_WORKFLOW_KIT global features.
 
 ## Open Decisions
 
-User approval is required before increasing the live worker count.
+User approval is required before increasing the live worker count beyond two.
 
 Later decisions.
 
@@ -212,7 +217,7 @@ MinimalityCheck notes
 ## Recommended Next Slice
 
 ```text
-Run a controlled multi-live dry run with an explicit live-worker count limit.
+Define controlled live-worker scaling policy after S-4 PASS.
 Keep API key values out of output, notes, logs, and commits.
 ```
 

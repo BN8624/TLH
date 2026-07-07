@@ -24,6 +24,59 @@ def concrete_mission(mission: str, answers: str) -> str:
 
 def decompose(run_id: str, mission: str, answers: str) -> list[TaskCard]:
     concrete = concrete_mission(mission, answers)
+    if "two live" in concrete.lower() or "multi-live" in concrete.lower() or "live worker limit" in concrete.lower():
+        return [
+            TaskCard(
+                task_id=f"{run_id}-T001",
+                run_id=run_id,
+                loop_index=0,
+                title="Define the S-4 live worker limit policy",
+                goal=(
+                    "Define scope, non-goals, files to inspect, and backend selection rules "
+                    "for a future live worker rollout policy with a hard live-worker limit."
+                ),
+                worker_role="builder",
+                input_context=[concrete],
+                expected_output="scope, non-goals, files to inspect, live worker limit policy, and backend selection rules.",
+                attach_point="FinalPacket.Scope",
+                merge_key="s4_limit_policy",
+                topology_hint="parallel",
+            ),
+            TaskCard(
+                task_id=f"{run_id}-T002",
+                run_id=run_id,
+                loop_index=0,
+                title="Define S-4 fallback and failure handling",
+                goal=(
+                    "Define fallback behavior, rollback or failure handling, secret handling, "
+                    "verification commands, and report format for a limited multi-live dry run."
+                ),
+                worker_role="critic",
+                input_context=[concrete],
+                expected_output="fallback, rollback, secret handling, verification, risks, and report format.",
+                attach_point="FinalPacket.Verification",
+                dependencies=[f"{run_id}-T001"],
+                merge_key="s4_fallback_quality",
+                topology_hint="parallel",
+            ),
+            TaskCard(
+                task_id=f"{run_id}-T003",
+                run_id=run_id,
+                loop_index=0,
+                title="Review S-4 live limit safety",
+                goal=(
+                    "Check that exactly two live workers are allowed, remaining workers stay stub-safe, "
+                    "metadata is recorded, and raw run artifacts remain uncommitted."
+                ),
+                worker_role="critic",
+                input_context=[concrete],
+                expected_output="section-mapped safety, metadata, verification, and report findings.",
+                attach_point="FinalPacket.ReportFormat",
+                dependencies=[f"{run_id}-T001", f"{run_id}-T002"],
+                merge_key="s4_limit_safety",
+                topology_hint="parallel",
+            ),
+        ]
     if "one live" in concrete.lower() or "one-live-worker" in concrete.lower():
         return [
             TaskCard(
