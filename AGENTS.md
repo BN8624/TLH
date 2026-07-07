@@ -15,6 +15,10 @@ When reusable workflow guidance is needed, prefer installed skills:
 
 ## Project Canon
 
+At the start of each new agent session in this repo, read `docs\TLH_INDEX.md` if it exists.
+Use it to select the relevant CANON-ID sections from `docs\TLH_CANON.md`.
+Do not read the full `TLH_CANON.md` unless the user explicitly asks for a full canon audit.
+
 If `docs\AI_INDEX.md` exists, read it before loading `docs\PROJECT_CANON.md`.
 
 ## Safety

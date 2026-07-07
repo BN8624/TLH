@@ -1,1 +1,26 @@
 .env
+
+# TLH generated run artifacts
+machine/runs/*
+!machine/runs/.gitkeep
+vault/00_Inbox/mission.md
+vault/01_Runs/run-*
+vault/02_TaskCards/run-*
+vault/02_TaskCards/task-*
+vault/03_WorkerResults/run-*
+vault/03_WorkerResults/worker-result-*
+vault/04_MergePackets/run-*
+vault/04_MergePackets/merge-*
+vault/05_Artifacts/run-*
+vault/05_Artifacts/artifact-*
+vault/06_Handoff/run-*
+vault/06_Handoff/final-packet-*
+vault/06_Handoff/codex-prompt-*
+vault/09_Decisions/run-*
+vault/11_MinimalityChecks/run-*
+vault/11_MinimalityChecks/minimality-*
+
+# Local caches
+__pycache__/
+*.pyc
+.pytest_cache/
