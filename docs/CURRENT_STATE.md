@@ -4,8 +4,9 @@
 
 TLH MVP skeleton is implemented.
 
-S-0 stabilization is in progress.
-Stub worker end-to-end flow has passed once.
+S-0 stabilization is complete.
+S-1 stub dry run completed with PARTIAL quality.
+S-1Q merge and final quality fix completed with PASS quality.
 Live Gemma is not integrated yet.
 
 The project direction is defined.
@@ -44,7 +45,7 @@ docs\TLH_IMPLEMENTATION_PROMPT.md
 
 ## Current Goal
 
-Stabilize the implemented TLH MVP skeleton before live worker work.
+Prepare for S-2 live Gemma adapter work without adding live calls yet.
 
 The MVP currently proves the following flow with stub workers.
 
@@ -84,6 +85,9 @@ CodexPrompt creation.
 Graph index generation.
 Generated artifact ignore policy.
 Temporary-workspace smoke test.
+Quality tests for handoff outputs.
+Section-mapped MergePacket material.
+Structured FinalPacket and CodexPrompt rendering.
 ```
 
 Excluded.
@@ -129,17 +133,10 @@ No README is required for now because this is a solo project.
 
 ## Next Action
 
-```text
-Finish S-0 stabilization.
-Keep generated run artifacts out of source commits.
-Run compile, help, init, and smoke verification.
-```
-
-After S-0, choose one of these S-1 paths.
+Choose the S-2 implementation path.
 
 ```text
-S-1 live Gemma adapter.
-S-1 real task dry run with stub workers.
+S-2 live Gemma adapter.
 ```
 
 ---
@@ -166,7 +163,7 @@ Do not duplicate AI_WORKFLOW_KIT global features.
 
 ## Open Decisions
 
-No blocking decision for S-0.
+No blocking decision for S-2 planning.
 
 Later decisions.
 
@@ -206,8 +203,8 @@ MinimalityCheck notes
 ## Recommended Next Slice
 
 ```text
-Run S-1 real task dry run with stub workers.
-Then decide whether to implement the live Gemma adapter.
+Implement S-2 live Gemma adapter behind environment-variable configuration.
+Preserve stub fallback and WorkerResult schema.
 ```
 
 ---

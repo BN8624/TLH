@@ -16,6 +16,7 @@ def merge(root: Path, run_id: str, rows: list[dict]) -> MergePacket:
     confirmed: list[str] = []
     risks: list[str] = []
     dropped: list[str] = []
+    sections = _empty_sections()
     for result in results:
         for item in result.findings:
             if item in seen:
@@ -23,8 +24,14 @@ def merge(root: Path, run_id: str, rows: list[dict]) -> MergePacket:
             else:
                 seen.add(item)
                 confirmed.append(item)
+                _attach_finding(sections, item)
         risks.extend(result.risks)
+    sections["Risks"].extend(_dedupe(risks))
+    unsupported = [item for item in confirmed if not _section_for(item)]
+    dropped.extend(f"Unsupported finding did not map to FinalPacket section: {item}" for item in unsupported)
     minimality = check_merge(run_id, kept=confirmed, dropped=dropped)
+    minimality_data = minimality.to_dict()
+    minimality_data["sections"] = sections
     packet = MergePacket(
         merge_id=f"{run_id}-M001",
         run_id=run_id,
@@ -36,8 +43,8 @@ def merge(root: Path, run_id: str, rows: list[dict]) -> MergePacket:
         dropped_items=dropped,
         attach_success=bool(confirmed),
         updated_artifact_version=1,
-        continuity_check="WorkerResults were structured and attachable to the accumulated artifact.",
-        minimality=minimality.to_dict(),
+        continuity_check="WorkerResults were structured, section-mapped, and attachable to the accumulated artifact.",
+        minimality=minimality_data,
     )
     run_dir = root / "machine" / "runs" / run_id
     write_jsonl(run_dir / "merge_packets.jsonl", [packet.to_dict()])
@@ -81,13 +88,30 @@ def _write_minimality_note(root: Path, run_id: str, minimality) -> None:
 
 
 def _write_artifact_note(root: Path, run_id: str, packet: MergePacket, risks: list[str]) -> None:
+    sections = packet.minimality.get("sections", {})
+    outputs = [
+        "Confirmed points:",
+        markdown_list(packet.confirmed_points),
+        "",
+        "Scope:",
+        markdown_list(sections.get("Scope", [])),
+        "",
+        "Out of Scope:",
+        markdown_list(sections.get("OutOfScope", [])),
+        "",
+        "Verification:",
+        markdown_list(sections.get("Verification", [])),
+        "",
+        "Risks:",
+        markdown_list(sections.get("Risks", risks)),
+    ]
     note = frontmatter_note(
         note_meta("accumulated_artifact", f"{run_id}-artifact-v1", run_id),
         {
             "Purpose": "Hold the current accumulated handoff artifact.",
             "Current State": "Version 1 contains merged scope, steps, risks, and verification points.",
             "Inputs": f"MergePacket: [[{packet.merge_id}]]",
-            "Outputs": f"Confirmed points:\n{markdown_list(packet.confirmed_points)}\n\nRisks:\n{markdown_list(risks)}",
+            "Outputs": "\n".join(outputs),
             "Links": f"- DERIVED_FROM: [[{packet.merge_id}]]",
             "Do Next": "Finalize if loop decision allows it.",
             "Do Not": "Do not bypass this artifact when creating FinalPacket.",
@@ -110,3 +134,59 @@ def _write_folded_summary(root: Path, run_id: str, packet: MergePacket) -> None:
         },
     )
     write_text(vault_root(root) / "05_Artifacts" / f"{run_id}-folded-summary-v1.md", note)
+
+
+def _empty_sections() -> dict[str, list[str]]:
+    return {
+        "Scope": [],
+        "OutOfScope": [],
+        "FilesToInspect": [],
+        "ExpectedChanges": [],
+        "ImplementationSteps": [],
+        "EnvironmentVariables": [],
+        "SecretHandling": [],
+        "StubFallback": [],
+        "Verification": [],
+        "FailureHandling": [],
+        "ReportFormat": [],
+        "SafetyRules": [],
+        "Risks": [],
+    }
+
+
+def _section_for(item: str) -> str | None:
+    prefix = item.split(":", 1)[0].strip().lower() if ":" in item else ""
+    return {
+        "scope": "Scope",
+        "non_goal": "OutOfScope",
+        "file": "FilesToInspect",
+        "change": "ExpectedChanges",
+        "step": "ImplementationSteps",
+        "env": "EnvironmentVariables",
+        "secret": "SecretHandling",
+        "fallback": "StubFallback",
+        "verification": "Verification",
+        "failure": "FailureHandling",
+        "report": "ReportFormat",
+        "safety": "SafetyRules",
+        "risk": "Risks",
+    }.get(prefix)
+
+
+def _attach_finding(sections: dict[str, list[str]], item: str) -> None:
+    section = _section_for(item)
+    if not section:
+        return
+    content = item.split(":", 1)[1].strip()
+    if content and content not in sections[section]:
+        sections[section].append(content)
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result

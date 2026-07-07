@@ -29,26 +29,33 @@ def decompose(run_id: str, mission: str, answers: str) -> list[TaskCard]:
             task_id=f"{run_id}-T001",
             run_id=run_id,
             loop_index=0,
-            title="Plan the concrete implementation handoff",
-            goal="Extract the implementation steps, scope, and attachable output structure from the mission.",
+            title="Define the S-2 live Gemma adapter handoff scope",
+            goal=(
+                "Identify the implementation boundary, files to inspect, expected changes, "
+                "and non-goals for live Gemma support without changing WorkerResult schema."
+            ),
             worker_role="builder",
             input_context=[concrete],
-            expected_output="Structured findings for the handoff plan.",
-            attach_point="AccumulatedArtifact.scope_and_steps",
-            merge_key="implementation_plan",
+            expected_output="scope, non-goals, files to inspect, expected changes, and implementation steps.",
+            attach_point="FinalPacket.Scope",
+            merge_key="s2_scope",
             topology_hint="parallel",
         ),
         TaskCard(
             task_id=f"{run_id}-T002",
             run_id=run_id,
             loop_index=0,
-            title="Review risks and verification",
-            goal="Identify missing assumptions, risks, and verification checks before final handoff.",
+            title="Define S-2 safety, fallback, and verification requirements",
+            goal=(
+                "Specify environment variable handling, secret safety, stub fallback behavior, "
+                "failure handling, verification commands, and report format for the S-2 handoff."
+            ),
             worker_role="critic",
             input_context=[concrete],
-            expected_output="Structured findings for risks, assumptions, and verification.",
-            attach_point="AccumulatedArtifact.risks_and_verification",
-            merge_key="risk_review",
+            expected_output="environment variables, secret handling, fallback, verification, failure handling, risks, and report format.",
+            attach_point="FinalPacket.Verification",
+            dependencies=[f"{run_id}-T001"],
+            merge_key="s2_safety_verification",
             topology_hint="parallel",
         ),
     ]

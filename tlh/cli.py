@@ -172,28 +172,24 @@ def _finalize(root: Path, run_id: str) -> int:
     if not rows:
         raise SystemExit("No merge packet found. Run merge first.")
     packet = rows[-1]
+    sections = _packet_sections(packet)
     final = FinalPacket(
         run_id=run_id,
         goal=state.get("concrete_mission", state["mission"]),
         current_state="Ready for Codex handoff after one slice-and-attach loop.",
         confirmed_assumptions=["Worker outputs were stub-generated for MVP skeleton verification."],
-        scope=packet.get("confirmed_points", []),
-        out_of_scope=["GUI", "Obsidian plugin", "global workflow automation", "automatic Codex or Claude execution"],
-        execution_steps=[
-            "Read the mission and constraints.",
-            "Implement the smallest CLI slice that satisfies the requested output.",
-            "Write JSONL output and keep parsing behavior explicit.",
-            "Run the listed verification commands.",
-        ],
-        risks=packet.get("conflicts", []),
-        verification=["Run the target CLI on a small markdown sample.", "Confirm JSONL output has one record per task note."],
-        handoff_prompt=_codex_prompt_text(state, packet),
+        scope=sections["Scope"],
+        out_of_scope=sections["OutOfScope"],
+        execution_steps=sections["ImplementationSteps"],
+        risks=sections["Risks"] + packet.get("conflicts", []),
+        verification=sections["Verification"],
+        handoff_prompt=_final_packet_text(state, packet, sections),
         user_decision_points=[],
     )
     final_id = f"{run_id}-final-packet"
     codex_id = f"{run_id}-codex-prompt"
     _write_final_note(root, run_id, final_id, final)
-    _write_codex_prompt(root, run_id, codex_id, final.handoff_prompt)
+    _write_codex_prompt(root, run_id, codex_id, _codex_prompt_text(state, packet, sections))
     graph_index.generate(root)
     state.update({"status": "finalized", "final_packet_id": final_id, "codex_prompt_id": codex_id})
     _save_state(root, state)
@@ -250,20 +246,125 @@ def _write_codex_prompt(root: Path, run_id: str, codex_id: str, prompt: str) -> 
     write_text(vault_root(root) / "06_Handoff" / f"{codex_id}.md", note)
 
 
-def _codex_prompt_text(state: dict, packet: dict) -> str:
+def _codex_prompt_text(state: dict, packet: dict, sections: dict[str, list[str]] | None = None) -> str:
+    sections = sections or _packet_sections(packet)
     return "\n".join(
         [
-            "Implement the requested CLI with the smallest working slice.",
+            "# Codex Handoff Prompt",
             "",
-            "Mission.",
+            "## Read Order",
+            "- `docs/TLH_INDEX.md`.",
+            "- `docs/CURRENT_STATE.md`.",
+            "- Relevant source files listed below.",
+            "",
+            "## Goal",
+            "Implement the requested change using the smallest safe code slice.",
+            "",
+            "## Mission",
             state.get("mission", "").strip(),
             "",
-            "Confirmed points.",
-            markdown_list(packet.get("confirmed_points", [])),
+            "## Non-goals",
+            markdown_list(sections["OutOfScope"]),
             "",
-            "Constraints.",
-            "- Do not add global workflow automation.",
-            "- Do not add GUI or external service dependencies.",
-            "- Verify with concrete commands before reporting completion.",
+            "## Files To Inspect",
+            markdown_list(sections["FilesToInspect"]),
+            "",
+            "## Implementation Steps",
+            markdown_list(sections["ImplementationSteps"] + sections["ExpectedChanges"]),
+            "",
+            "## Environment Variables",
+            markdown_list(sections["EnvironmentVariables"]),
+            "",
+            "## Safety Rules",
+            markdown_list(sections["SecretHandling"] + sections["StubFallback"] + sections["SafetyRules"]),
+            "",
+            "## Verification Commands",
+            markdown_list(sections["Verification"]),
+            "",
+            "## Failure Handling",
+            markdown_list(sections["FailureHandling"]),
+            "",
+            "## Report Format",
+            markdown_list(sections["ReportFormat"]),
+            "",
+            "## Do Not Push",
+            "- Do not push unless the user explicitly asks.",
         ]
     )
+
+
+def _final_packet_text(state: dict, packet: dict, sections: dict[str, list[str]]) -> str:
+    return "\n".join(
+        [
+            "# FinalPacket",
+            "",
+            "## Goal",
+            state.get("mission", "").strip(),
+            "",
+            "## Current State",
+            "One stub-worker slice attached successfully and produced an executable handoff draft.",
+            "",
+            "## Scope",
+            markdown_list(sections["Scope"]),
+            "",
+            "## Out of Scope",
+            markdown_list(sections["OutOfScope"]),
+            "",
+            "## Files To Inspect",
+            markdown_list(sections["FilesToInspect"]),
+            "",
+            "## Expected Changes",
+            markdown_list(sections["ExpectedChanges"]),
+            "",
+            "## Environment Variables",
+            markdown_list(sections["EnvironmentVariables"]),
+            "",
+            "## Secret Handling",
+            markdown_list(sections["SecretHandling"]),
+            "",
+            "## Stub Fallback",
+            markdown_list(sections["StubFallback"]),
+            "",
+            "## Verification",
+            markdown_list(sections["Verification"]),
+            "",
+            "## Failure Handling",
+            markdown_list(sections["FailureHandling"]),
+            "",
+            "## Report Format",
+            markdown_list(sections["ReportFormat"]),
+            "",
+            "## Risks",
+            markdown_list(sections["Risks"] + packet.get("conflicts", [])),
+            "",
+            "## User Decision Points",
+            "None.",
+            "",
+            "## Confirmed Points",
+            markdown_list(packet.get("confirmed_points", [])),
+        ]
+    )
+
+
+def _packet_sections(packet: dict) -> dict[str, list[str]]:
+    defaults = {
+        "Scope": ["Implement only the requested TLH adapter slice."],
+        "OutOfScope": ["GUI, dashboard, MCP write, RTK hook, automatic push, and AI_WORKFLOW_KIT duplication."],
+        "FilesToInspect": ["tlh/gemma_client.py", "tlh/worker_pool.py", "tlh/dispatcher.py", "tests/"],
+        "ExpectedChanges": ["Preserve WorkerResult structure and stub fallback."],
+        "ImplementationSteps": ["Read existing worker path.", "Add the smallest adapter change.", "Verify without network by default."],
+        "EnvironmentVariables": ["Use environment variables for live configuration and tolerate missing values."],
+        "SecretHandling": ["Never store secrets in repo, vault, machine artifacts, logs, or test fixtures."],
+        "StubFallback": ["Keep stub output with `stub_generated: true` when live mode is unavailable."],
+        "Verification": ["python -m compileall tlh", "python -m pytest"],
+        "FailureHandling": ["On live adapter failure, report the error class and use stub fallback."],
+        "ReportFormat": ["Changed files, commands run, live mode status, fallback status, risks, and next step."],
+        "SafetyRules": ["Do not push automatically."],
+        "Risks": [],
+    }
+    sections = packet.get("minimality", {}).get("sections", {})
+    merged: dict[str, list[str]] = {}
+    for key, fallback in defaults.items():
+        values = sections.get(key) or fallback
+        merged[key] = list(values)
+    return merged
