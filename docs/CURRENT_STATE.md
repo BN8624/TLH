@@ -17,6 +17,8 @@ S-7 routing policy dry-run CLI command is implemented with PASS-candidate tests.
 The project direction is defined.
 AICO is deprecated and must not be used as the architecture base.
 AI_WORKFLOW_KIT exists as a separate global workflow layer and must not be duplicated inside TLH.
+TLH completion reports should include a short `Tooling` block that records which AI_WORKFLOW_KIT components were actually used, which were not used, and why.
+Serena MCP is `USED` only when it is used for code structure, symbol, reference, or impact-range work; status checks are `AVAILABLE_ONLY`.
 
 ---
 
@@ -187,6 +189,23 @@ Do not make raw logs the source of truth.
 Do not read the entire TLH_CANON.md by default.
 Do not duplicate AI_WORKFLOW_KIT global features.
 ```
+
+---
+
+## Tooling Report Rule
+
+Use this short block near the end of TLH completion reports.
+
+```text
+Tooling.
+- Used:
+- Not used:
+- Reason:
+```
+
+Use AI_WORKFLOW_KIT components only when they fit the task.
+Do not treat `claude mcp list` or availability checks as real Serena MCP use.
+TLH native MCP is not required for current TLH work.
 
 ---
 
