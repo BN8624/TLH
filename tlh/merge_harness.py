@@ -217,6 +217,12 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
     retry_budget_limit = 0
     retry_budget_exhausted_count = 0
     key_slot_preserved = True
+    wave_enabled = False
+    wave_size = None
+    wave_count = 0
+    max_concurrent_live_workers = 0
+    target_live_workers = 0
+    wave_indices: set[int] = set()
     for result in results:
         backend_mix[result.backend] = backend_mix.get(result.backend, 0) + 1
         requested = result.metadata.get("requested_backend")
@@ -238,6 +244,19 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
             retry_budget_exhausted_count += 1
         if result.metadata.get("key_slot_preserved") is False:
             key_slot_preserved = False
+        if result.metadata.get("wave_enabled"):
+            wave_enabled = True
+        if result.metadata.get("wave_size"):
+            wave_size = result.metadata.get("wave_size")
+        wave_count = max(wave_count, _int_value(result.metadata.get("wave_count")))
+        max_concurrent_live_workers = max(
+            max_concurrent_live_workers,
+            _int_value(result.metadata.get("max_concurrent_live_workers")),
+        )
+        target_live_workers = max(target_live_workers, _int_value(result.metadata.get("target_live_workers")))
+        wave_index = _int_value(result.metadata.get("wave_index"))
+        if wave_index:
+            wave_indices.add(wave_index)
         retry_count = _int_value(result.metadata.get("retry_count"))
         first_error_type = str(result.metadata.get("first_error_type", "none"))
         if first_error_type in {"timeout", "api_503_high_demand", "api_500_internal", "api_429_rate_limit"}:
@@ -284,6 +303,18 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
             "successful_workers_rerun": False,
             "key_slot_preserved": key_slot_preserved,
         },
+        "wave_policy": {
+            "enabled": wave_enabled,
+            "wave_size": wave_size,
+            "wave_count": wave_count,
+            "max_concurrent_live_workers": max_concurrent_live_workers,
+            "target_live_workers": target_live_workers,
+            "actual_live_workers": backend_mix.get("live", 0),
+            "waves_observed": sorted(wave_indices),
+            "successful_workers_rerun": False,
+            "retry_within_wave": True,
+            "preserve_key_slot": True,
+        },
         "fallback_used": any(result.fallback_used for result in results),
         "policy_routing_stub_count": policy_routing_stub_count,
         "fallback_stub_count": fallback_stub_count,
@@ -294,6 +325,7 @@ def _routing_lines(routing: dict) -> list[str]:
     policy = routing.get("routing_policy", {})
     mix = routing.get("backend_mix", {})
     retry = routing.get("retry_policy", {})
+    wave = routing.get("wave_policy", {})
     return [
         f"policy mode: {policy.get('mode', 'unknown')}",
         f"max live workers: {policy.get('max_live_workers', 'unknown')}",
@@ -308,6 +340,12 @@ def _routing_lines(routing: dict) -> list[str]:
         f"assigned key slots: {_slot_list(routing.get('key_pool', {}).get('assigned_key_slots', []))}",
         f"distinct key slots used: {routing.get('key_pool', {}).get('distinct_key_slots_used', 0)}",
         f"single-key mode: {routing.get('key_pool', {}).get('single_key_mode', True)}",
+        f"wave policy enabled: {wave.get('enabled', False)}",
+        f"wave size: {wave.get('wave_size', 'none')}",
+        f"wave count: {wave.get('wave_count', 0)}",
+        f"max concurrent live workers: {wave.get('max_concurrent_live_workers', 0)}",
+        f"target live workers: {wave.get('target_live_workers', 0)}",
+        f"actual live workers: {wave.get('actual_live_workers', 0)}",
         f"retry policy enabled: {retry.get('enabled', False)}",
         f"max retry attempts: {retry.get('max_retry_attempts', 0)}",
         f"retry backoff enabled: {retry.get('backoff_enabled', False)}",

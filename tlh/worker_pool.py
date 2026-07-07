@@ -653,6 +653,7 @@ def _worker_metadata(
         _attach_key_pool_metadata(metadata, env, backend)
         if telemetry:
             metadata.update(telemetry)
+        _attach_wave_metadata(metadata, env)
         if fallback_used:
             metadata["routing_reason"] = f"live call failed; stub fallback used: {metadata['routing_reason']}"
         return metadata
@@ -676,6 +677,7 @@ def _worker_metadata(
     _attach_key_pool_metadata(metadata, env, backend)
     if telemetry:
         metadata.update(telemetry)
+    _attach_wave_metadata(metadata, env)
     return metadata
 
 
@@ -700,6 +702,34 @@ def _attach_key_pool_metadata(metadata: dict[str, int | str | bool | None], env:
         metadata["single_key_mode"] = mode == "single_key"
     if env.get("TLH_GEMMA_KEY_SLOT"):
         metadata["key_slot"] = _int_metadata(env.get("TLH_GEMMA_KEY_SLOT", "0"))
+
+
+def _attach_wave_metadata(metadata: dict, env: Mapping[str, str]) -> None:
+    enabled_raw = env.get("TLH_LIVE_WAVE_ENABLED")
+    if enabled_raw is None:
+        return
+    enabled = enabled_raw.strip().lower() in {"1", "true", "yes", "on"}
+    metadata["wave_enabled"] = enabled
+    metadata["wave_index"] = _int_metadata(env.get("TLH_LIVE_WAVE_INDEX", "0")) or None
+    metadata["wave_size"] = _int_metadata(env.get("TLH_LIVE_WAVE_SIZE", "0")) or None
+    metadata["wave_count"] = _int_metadata(env.get("TLH_LIVE_WAVE_COUNT", "0"))
+    metadata["target_live_workers"] = _int_metadata(env.get("TLH_LIVE_WAVE_TARGET_LIVE_WORKERS", "0"))
+    metadata["max_concurrent_live_workers"] = _int_metadata(env.get("TLH_LIVE_WAVE_MAX_CONCURRENT", "0"))
+    metadata["wave_preserve_key_slot"] = env.get("TLH_LIVE_WAVE_PRESERVE_KEY_SLOT", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    metadata["retry_within_wave"] = env.get("TLH_LIVE_WAVE_RETRY_WITHIN_WAVE", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    metadata["successful_workers_rerun"] = env.get(
+        "TLH_LIVE_WAVE_SUCCESSFUL_WORKERS_RERUN", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _telemetry_without_live_attempt(

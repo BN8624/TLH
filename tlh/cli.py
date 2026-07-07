@@ -25,6 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     route_parser = sub.add_parser("route-dry-run")
     route_parser.add_argument("--workers", type=int, default=2)
     route_parser.add_argument("--live-limit", type=int)
+    route_parser.add_argument("--live-wave-size", type=_positive_int)
     route_parser.add_argument("--mode", choices=["stub_only", "one_live", "limited_live", "full_live"])
     route_parser.add_argument("--force-backend", choices=["stub", "live"])
     route_parser.add_argument("--allow-full-live", action="store_true")
@@ -76,6 +77,8 @@ def _route_dry_run(args) -> int:
     if args.live_limit is not None:
         env["TLH_LIVE_WORKER_LIMIT"] = str(args.live_limit)
         env["TLH_LIVE_WORKER_LIMIT_SOURCE"] = "cli:--live-limit"
+    if args.live_wave_size is not None:
+        env["TLH_LIVE_WAVE_SIZE"] = str(args.live_wave_size)
     if args.force_backend:
         env["TLH_FORCE_WORKER_BACKEND"] = args.force_backend
     if args.allow_full_live:
@@ -88,6 +91,7 @@ def _route_dry_run(args) -> int:
     simulation = simulate_routing_decisions(args.workers, env, requested="live")
     payload = simulation.to_dict()
     payload["key_pool"] = _route_key_pool_summary(payload, key_slots)
+    payload = _attach_route_wave_slots(payload, key_slots)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
@@ -95,10 +99,18 @@ def _route_dry_run(args) -> int:
     return 0
 
 
+def _positive_int(raw: str) -> int:
+    value = int(raw)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return value
+
+
 def _route_dry_run_text(payload: dict, force_backend: str | None) -> str:
     policy = payload["policy"]
     mix = payload["backend_mix"]
     guards = payload["guards"]
+    wave_policy = payload.get("wave_policy", {})
     lines = [
         "TLH Routing Policy Dry Run",
         "",
@@ -116,6 +128,14 @@ def _route_dry_run_text(payload: dict, force_backend: str | None) -> str:
         f"- stub: {mix['stub']}",
         f"- fallback: {mix['fallback']}",
         "",
+        "wave_policy:",
+        f"- wave_enabled: {_yes_no(wave_policy.get('enabled', False))}",
+        f"- wave_size: {wave_policy.get('wave_size') or 'none'}",
+        f"- wave_count: {wave_policy.get('wave_count', 0)}",
+        f"- max_concurrent_live_workers: {wave_policy.get('max_concurrent_live_workers', mix['live'])}",
+        f"- target_live_workers: {wave_policy.get('target_live_workers', mix['live'])}",
+        f"- successful_workers_rerun: {_yes_no(wave_policy.get('successful_workers_rerun', False))}",
+        "",
         "guards:",
         f"- force_live_bypasses_limit: {_yes_no(guards['force_live_bypassed_limit'])}",
         f"- force_live_implies_full_live: {_yes_no(guards['force_live_implied_full_live'])}",
@@ -128,8 +148,21 @@ def _route_dry_run_text(payload: dict, force_backend: str | None) -> str:
         f"- single-key mode: {_yes_no(payload.get('key_pool', {}).get('single_key_mode', True))}",
         f"- key values printed: {_yes_no(False)}",
         "",
-        "decisions:",
+        "waves:",
     ]
+    lines.extend(
+        f"- wave {wave['wave_index']}: workers={_slot_list(wave.get('worker_indices', []))} "
+        f"key_slots={_slot_list(wave.get('key_slots', []))}"
+        for wave in payload.get("waves", [])
+    )
+    if not payload.get("waves"):
+        lines.append("- none")
+    lines.extend(
+        [
+            "",
+            "decisions:",
+        ]
+    )
     lines.extend(
         f"- worker {decision['worker_index']}: requested={decision['requested_backend']} "
         f"selected={decision['selected_backend']} reason=\"{decision['reason']}\""
@@ -150,6 +183,28 @@ def _route_key_pool_summary(payload: dict, key_slots: dict[int, str]) -> dict:
         if key_slot is not None:
             assigned.append(key_slot)
     return safe_key_pool_summary(len(key_slots), assigned)
+
+
+def _attach_route_wave_slots(payload: dict, key_slots: dict[int, str]) -> dict:
+    if not payload.get("wave_policy", {}).get("enabled"):
+        return payload
+    key_slot_by_worker = {}
+    for decision in payload.get("decisions", []):
+        if decision.get("selected_backend") != "live":
+            continue
+        live_worker_index = decision.get("live_worker_index")
+        if live_worker_index is None:
+            continue
+        key_slot = assign_key_slot_for_live_worker(int(live_worker_index), key_slots)
+        if key_slot is not None:
+            key_slot_by_worker[int(decision["worker_index"])] = key_slot
+    for wave in payload.get("waves", []):
+        wave["key_slots"] = [
+            key_slot_by_worker[index]
+            for index in wave.get("worker_indices", [])
+            if index in key_slot_by_worker
+        ]
+    return payload
 
 
 def _slot_list(slots) -> str:
@@ -493,6 +548,7 @@ def _routing_lines(packet: dict) -> list[str]:
     mix = routing.get("backend_mix", {})
     key_pool = routing.get("key_pool", {})
     retry = routing.get("retry_policy", {})
+    wave = routing.get("wave_policy", {})
     return [
         f"live WorkerResults: {mix.get('live', 0)}",
         f"stub WorkerResults: {mix.get('stub', 0)}",
@@ -503,6 +559,12 @@ def _routing_lines(packet: dict) -> list[str]:
         f"assigned key slots: {_slot_list(key_pool.get('assigned_key_slots', []))}",
         f"distinct key slots used: {key_pool.get('distinct_key_slots_used', 0)}",
         f"single-key mode: {key_pool.get('single_key_mode', True)}",
+        f"wave policy enabled: {wave.get('enabled', False)}",
+        f"wave size: {wave.get('wave_size', 'none')}",
+        f"wave count: {wave.get('wave_count', 0)}",
+        f"max concurrent live workers: {wave.get('max_concurrent_live_workers', 0)}",
+        f"target live workers: {wave.get('target_live_workers', 0)}",
+        f"actual live workers: {wave.get('actual_live_workers', 0)}",
         f"retry policy enabled: {retry.get('enabled', False)}",
         f"max retry attempts: {retry.get('max_retry_attempts', 0)}",
         f"retry backoff enabled: {retry.get('backoff_enabled', False)}",

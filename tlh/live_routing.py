@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Mapping
 
 from .schemas import TaskCard
@@ -50,10 +50,46 @@ class LiveRoutingDecision:
 
 
 @dataclass
+class LiveWave:
+    wave_index: int
+    worker_indices: list[int]
+    key_slots: list[int] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class LiveWavePlan:
+    enabled: bool
+    wave_size: int | None
+    wave_count: int
+    target_live_workers: int
+    max_concurrent_live_workers: int
+    preserve_key_slot: bool = True
+    retry_within_wave: bool = True
+    successful_workers_rerun: bool = False
+    waves: list[LiveWave] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "enabled": self.enabled,
+            "wave_size": self.wave_size,
+            "wave_count": self.wave_count,
+            "target_live_workers": self.target_live_workers,
+            "max_concurrent_live_workers": self.max_concurrent_live_workers,
+            "preserve_key_slot": self.preserve_key_slot,
+            "retry_within_wave": self.retry_within_wave,
+            "successful_workers_rerun": self.successful_workers_rerun,
+        }
+
+
+@dataclass
 class LiveRoutingSimulation:
     worker_count: int
     policy: LiveRoutingPolicy
     decisions: list[LiveRoutingDecision]
+    wave_plan: LiveWavePlan | None = None
 
     def backend_mix(self) -> dict[str, int]:
         return {
@@ -74,6 +110,7 @@ class LiveRoutingSimulation:
         }
 
     def to_dict(self) -> dict:
+        wave_plan = self.wave_plan or build_live_wave_plan(self.decisions, None)
         return {
             "worker_count": self.worker_count,
             "policy": {
@@ -86,6 +123,8 @@ class LiveRoutingSimulation:
             },
             "backend_mix": self.backend_mix(),
             "guards": self.guards(),
+            "wave_policy": wave_plan.to_dict(),
+            "waves": [wave.to_dict() for wave in wave_plan.waves],
             "decisions": [
                 {
                     "worker_index": decision.worker_index,
@@ -273,7 +312,63 @@ def simulate_routing_decisions(worker_count: int, env: Mapping[str, str], reques
         if decision.selected_backend == "live":
             live_workers_used += 1
         decisions.append(decision)
-    return LiveRoutingSimulation(worker_count=worker_count, policy=policy, decisions=decisions)
+    wave_plan = build_live_wave_plan(decisions, live_wave_size(env))
+    return LiveRoutingSimulation(worker_count=worker_count, policy=policy, decisions=decisions, wave_plan=wave_plan)
+
+
+def live_wave_size(env: Mapping[str, str]) -> int | None:
+    raw = env.get("TLH_LIVE_WAVE_SIZE", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("TLH_LIVE_WAVE_SIZE must be a positive integer.") from exc
+    if value <= 0:
+        raise ValueError("TLH_LIVE_WAVE_SIZE must be greater than 0.")
+    return value
+
+
+def build_live_wave_plan(
+    decisions: list[LiveRoutingDecision],
+    wave_size: int | None,
+    key_slots_by_worker: Mapping[int, int] | None = None,
+) -> LiveWavePlan:
+    live_decisions = [decision for decision in decisions if decision.selected_backend == "live"]
+    target_live_workers = len(live_decisions)
+    if not wave_size:
+        return LiveWavePlan(
+            enabled=False,
+            wave_size=None,
+            wave_count=0,
+            target_live_workers=target_live_workers,
+            max_concurrent_live_workers=target_live_workers,
+            waves=[],
+        )
+
+    waves: list[LiveWave] = []
+    key_slots_by_worker = key_slots_by_worker or {}
+    for offset in range(0, target_live_workers, wave_size):
+        chunk = live_decisions[offset : offset + wave_size]
+        waves.append(
+            LiveWave(
+                wave_index=len(waves) + 1,
+                worker_indices=[decision.worker_index for decision in chunk],
+                key_slots=[
+                    key_slots_by_worker[decision.worker_index]
+                    for decision in chunk
+                    if decision.worker_index in key_slots_by_worker
+                ],
+            )
+        )
+    return LiveWavePlan(
+        enabled=True,
+        wave_size=wave_size,
+        wave_count=len(waves),
+        target_live_workers=target_live_workers,
+        max_concurrent_live_workers=max((len(wave.worker_indices) for wave in waves), default=0),
+        waves=waves,
+    )
 
 
 def _decision(
