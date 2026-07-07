@@ -216,6 +216,10 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
     retry_budget_enabled = False
     retry_budget_limit = 0
     retry_budget_exhausted_count = 0
+    retry_budget_policy = "run_scoped_first_come"
+    retry_budget_claimed_total = 0
+    retry_budget_claimed_by_wave: dict[str, int] = {}
+    retry_budget_exhausted_by_wave: dict[str, int] = {}
     key_slot_preserved = True
     wave_enabled = False
     wave_size = None
@@ -225,6 +229,12 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
     wave_indices: set[int] = set()
     runtime_execution_model = "sequential"
     actual_concurrency_limited = False
+    wave_cooldown_enabled = False
+    wave_cooldown_seconds = 0.0
+    adaptive_pacing_enabled = False
+    cooldown_applied_between_waves = False
+    cooldown_total_seconds = 0.0
+    cooldown_by_wave: dict[str, float] = {}
     per_wave_worker_counts: dict[int, int] = {}
     per_wave_live_results: dict[int, int] = {}
     per_wave_fallback_results: dict[int, int] = {}
@@ -245,6 +255,15 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
         if result.metadata.get("retry_budget_enabled"):
             retry_budget_enabled = True
         retry_budget_limit = max(retry_budget_limit, _int_value(result.metadata.get("retry_budget_limit")))
+        retry_budget_policy = str(result.metadata.get("retry_budget_policy", retry_budget_policy))
+        retry_budget_claimed_total = max(
+            retry_budget_claimed_total,
+            _int_value(result.metadata.get("retry_budget_claimed_total")),
+        )
+        if isinstance(result.metadata.get("retry_budget_claimed_by_wave"), dict):
+            retry_budget_claimed_by_wave.update(result.metadata.get("retry_budget_claimed_by_wave", {}))
+        if isinstance(result.metadata.get("retry_budget_exhausted_by_wave"), dict):
+            retry_budget_exhausted_by_wave.update(result.metadata.get("retry_budget_exhausted_by_wave", {}))
         if result.metadata.get("retry_skipped_reason") == "retry budget exhausted":
             retry_budget_exhausted_count += 1
         if result.metadata.get("key_slot_preserved") is False:
@@ -271,6 +290,16 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
             runtime_execution_model = "concurrent_wave"
         if result.metadata.get("actual_concurrency_limited"):
             actual_concurrency_limited = True
+        if result.metadata.get("wave_cooldown_enabled"):
+            wave_cooldown_enabled = True
+        wave_cooldown_seconds = max(wave_cooldown_seconds, float(result.metadata.get("wave_cooldown_seconds") or 0.0))
+        if result.metadata.get("adaptive_pacing_enabled"):
+            adaptive_pacing_enabled = True
+        if result.metadata.get("cooldown_applied_between_waves"):
+            cooldown_applied_between_waves = True
+        cooldown_total_seconds = max(cooldown_total_seconds, float(result.metadata.get("cooldown_total_seconds") or 0.0))
+        if isinstance(result.metadata.get("cooldown_by_wave"), dict):
+            cooldown_by_wave.update(result.metadata.get("cooldown_by_wave", {}))
         retry_count = _int_value(result.metadata.get("retry_count"))
         first_error_type = str(result.metadata.get("first_error_type", "none"))
         if first_error_type in {"timeout", "api_503_high_demand", "api_500_internal", "api_429_rate_limit"}:
@@ -309,6 +338,10 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
             "retry_budget_enabled": retry_budget_enabled,
             "retry_budget_limit": retry_budget_limit,
             "retry_budget_scope": "run",
+            "retry_budget_policy": retry_budget_policy,
+            "retry_budget_claimed_total": retry_budget_claimed_total,
+            "retry_budget_claimed_by_wave": retry_budget_claimed_by_wave,
+            "retry_budget_exhausted_by_wave": retry_budget_exhausted_by_wave,
             "retryable_error_count": retryable_error_count,
             "retried_worker_count": retried_worker_count,
             "retry_success_count": retry_success_count,
@@ -337,6 +370,12 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
             "successful_workers_rerun": False,
             "retry_within_wave": True,
             "preserve_key_slot": True,
+            "wave_cooldown_enabled": wave_cooldown_enabled,
+            "wave_cooldown_seconds": wave_cooldown_seconds,
+            "adaptive_pacing_enabled": adaptive_pacing_enabled,
+            "cooldown_applied_between_waves": cooldown_applied_between_waves,
+            "cooldown_total_seconds": cooldown_total_seconds,
+            "cooldown_by_wave": cooldown_by_wave,
         },
         "fallback_used": any(result.fallback_used for result in results),
         "policy_routing_stub_count": policy_routing_stub_count,
@@ -375,6 +414,11 @@ def _routing_lines(routing: dict) -> list[str]:
         f"per-wave worker counts: {wave.get('per_wave_worker_counts', {})}",
         f"per-wave live results: {wave.get('per_wave_live_results', {})}",
         f"per-wave fallback results: {wave.get('per_wave_fallback_results', {})}",
+        f"wave cooldown enabled: {wave.get('wave_cooldown_enabled', False)}",
+        f"wave cooldown seconds: {wave.get('wave_cooldown_seconds', 0)}",
+        f"adaptive pacing enabled: {wave.get('adaptive_pacing_enabled', False)}",
+        f"cooldown applied between waves: {wave.get('cooldown_applied_between_waves', False)}",
+        f"cooldown by wave: {wave.get('cooldown_by_wave', {})}",
         f"retry policy enabled: {retry.get('enabled', False)}",
         f"max retry attempts: {retry.get('max_retry_attempts', 0)}",
         f"retry backoff enabled: {retry.get('backoff_enabled', False)}",
@@ -383,6 +427,10 @@ def _routing_lines(routing: dict) -> list[str]:
         f"retry budget enabled: {retry.get('retry_budget_enabled', False)}",
         f"retry budget limit: {retry.get('retry_budget_limit', 0)}",
         f"retry budget scope: {retry.get('retry_budget_scope', 'run')}",
+        f"retry budget policy: {retry.get('retry_budget_policy', 'run_scoped_first_come')}",
+        f"retry budget claimed total: {retry.get('retry_budget_claimed_total', 0)}",
+        f"retry budget claimed by wave: {retry.get('retry_budget_claimed_by_wave', {})}",
+        f"retry budget exhausted by wave: {retry.get('retry_budget_exhausted_by_wave', {})}",
         f"retryable error count: {retry.get('retryable_error_count', 0)}",
         f"retried worker count: {retry.get('retried_worker_count', 0)}",
         f"retry success count: {retry.get('retry_success_count', 0)}",

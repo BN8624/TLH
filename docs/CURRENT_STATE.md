@@ -72,6 +72,7 @@ S-18 Controlled Live-22 Wave Trial completed with FAIL-candidate quality: run_id
 S-17R/S-18R Runtime Wave Semantics Fix completed with PASS-candidate tests: previous wave policy affected execution order/metadata only; dispatcher now executes workers concurrently within each wave using `ThreadPoolExecutor`; wave-size limits actual concurrent `run_worker` calls; worker_count 22 with live-limit 22 and wave-size 11 plans two waves with max concurrent live workers 11; wave 2 starts after wave 1 completes; result order remains deterministic by worker_index; retry budget is run-scoped and thread-safe; successful workers are not rerun; retry preserves key_slot; route-dry-run text/JSON report `runtime_execution_model: concurrent_wave`; no actual live-22 wave run was executed; live-limit 22 remains a capacity/wave trial result, not a baseline.
 S-19 Controlled Live-22 True Wave Trial completed with PARTIAL quality: run_id `run-20260707-173526`, timeout 300s, limited_live live-limit 22, live-wave-size 11, runtime execution model concurrent_wave, preflight live 22 / stub 0 / fallback 0, wave-count 2, planned max concurrent live workers 11, observed max concurrent run_worker calls 11, wave 2 started after wave 1, result order deterministic, actual live 19 / stub 3 / fallback 3, available key slots 22, assigned key slots 1-22, distinct key slots used 22, single-key mode NO, max retry attempts 2, backoff and jitter enabled, retry budget 5 workers per run, retry budget scope run, retryable error count 7, retried worker count 5, retry success count 4, retry failure count 1, fallback after retry count 1, retry budget exhausted count 2, fallback cause API 500 internal error, comparison vs S-16/S-18 improved but not stable, baseline unchanged at live-limit 5 with timeout 300s, raw artifacts ignored and not committed.
 S-20 Controlled Live-22 True Wave-8 Trial completed with PARTIAL quality: run_id `run-20260707-174656`, timeout 300s, limited_live live-limit 22, live-wave-size 8, runtime execution model concurrent_wave, preflight live 22 / stub 0 / fallback 0, wave-count 3 with planned waves 8 + 8 + 6, planned max concurrent live workers 8, observed max concurrent run_worker calls 8, wave 2 started after wave 1, wave 3 started after wave 2, result order deterministic, actual live 17 / stub 5 / fallback 5, available key slots 22, assigned key slots 1-22, distinct key slots used 22, single-key mode NO, max retry attempts 2, backoff and jitter enabled, retry budget 5 workers per run, retry budget scope run, retryable error count 10, retried worker count 5, retry success count 5, retry failure count 0, fallback after retry count 0, retry budget exhausted count 5, fallback causes API 429 rate limit and API 500 internal error, comparison vs S-19 worse on final live count and fallback count because the run-scoped retry budget was consumed before wave 3, baseline unchanged at live-limit 5 with timeout 300s, raw artifacts ignored and not committed.
+S-21 Wave-aware Retry Budget + Adaptive Pacing Policy completed with PASS-candidate tests: retry budget remains run-scoped with default limit 5, allocation is wave-aware with future-wave reserve to prevent later-wave starvation, unused reserve carries forward, retry budget claim/exhausted counts are thread-safe under concurrent wave execution, route-dry-run reports retry budget policy and optional pacing, `--live-wave-cooldown-seconds` / `TLH_LIVE_WAVE_COOLDOWN_SECONDS` can enable cooldown before the next wave after API 429 rate-limit signals, default cooldown remains 0 seconds, FinalPacket and CodexPrompt summaries include budget and pacing metadata, no actual live-22 run was executed, live-limit 22 remains a capacity/wave trial result and not a baseline.
 
 The MVP currently proves the following flow with stub workers.
 
@@ -132,6 +133,7 @@ Targeted retry policy for transient live worker failures.
 Retry backoff, jitter, and per-run retry budget policy for transient live worker failures.
 Live concurrency wave policy and route-dry-run wave planning.
 True concurrent wave execution with run-scoped retry budget locking.
+Wave-aware retry budget allocation with optional adaptive wave pacing.
 Mock live adapter tests.
 One-live-worker live dry run review.
 Multi-live limit dry run review.
@@ -190,7 +192,7 @@ The approved baseline is live-limit 5 with `TLH_GEMMA_TIMEOUT_SECONDS=300`.
 python -m tlh route-dry-run --workers 11 --mode limited_live --live-limit 5
 ```
 
-The next controlled scaling decision should treat live-limit 22 true wave as still transient-sensitive. S-20 shows wave-size 8 limits actual concurrency but can push retryable failures into later waves after the run-scoped retry budget is exhausted; further work should review retry budget allocation across waves, adaptive per-wave pacing, or API-side demand timing before another approved live-limit 22 run.
+The next controlled scaling decision should use route-dry-run to verify wave-aware budget and pacing metadata before any further live-limit 22 trial. S-21 addresses the S-20 retry budget starvation problem in mock tests; a future user-approved S-22 live trial should keep live-limit 22 out of the baseline and explicitly choose wave size and cooldown settings.
 
 ---
 
@@ -250,6 +252,7 @@ S-18 shows live-limit 22 with wave-size 11 is not stable and was worse than S-16
 S-17R/S-18R makes wave-size a real runtime concurrency limiter and keeps retry budget run-scoped; it does not promote live-limit 22 or wave-size 11 to baseline.
 S-19 shows true concurrent wave-size 11 improves live-limit 22 behavior versus S-16 and S-18, but final live results remained below 22 and fallback after retry remained nonzero; do not promote live-limit 22 or wave-size 11 to baseline.
 S-20 shows true concurrent wave-size 8 enforces observed max concurrency 8 with three waves, but final live results dropped to 17 because retryable API failures in wave 3 could not be retried after the run-scoped retry budget was consumed; do not promote live-limit 22 or wave-size 8 to baseline.
+S-21 changes retry budget allocation to wave-aware reserve and adds optional adaptive wave cooldown, but it is mock/test validated only; do not infer live-limit 22 stability until a separate approved live trial runs.
 
 Later decisions.
 

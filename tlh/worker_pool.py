@@ -28,10 +28,16 @@ RETRYABLE_ERROR_TYPES = {"timeout", "api_503_high_demand", "api_500_internal", "
 
 
 class RetryBudget:
-    def __init__(self, limit: int, enabled: bool = True) -> None:
+    def __init__(self, limit: int, enabled: bool = True, wave_count: int = 0) -> None:
         self.limit = max(0, limit)
         self.enabled = enabled
+        self.wave_count = max(0, wave_count)
+        self.policy = "wave_aware_reserve" if self.wave_count > 1 else "run_scoped_first_come"
         self._remaining = self.limit
+        self._claimed_total = 0
+        self._exhausted_count = 0
+        self._claimed_by_wave: dict[int, int] = {}
+        self._exhausted_by_wave: dict[int, int] = {}
         self._lock = threading.Lock()
 
     @property
@@ -39,14 +45,79 @@ class RetryBudget:
         with self._lock:
             return self._remaining
 
-    def claim(self) -> bool:
+    @property
+    def claimed_total(self) -> int:
+        with self._lock:
+            return self._claimed_total
+
+    @property
+    def exhausted_count(self) -> int:
+        with self._lock:
+            return self._exhausted_count
+
+    @property
+    def claimed_by_wave(self) -> dict[int, int]:
+        with self._lock:
+            return dict(self._claimed_by_wave)
+
+    @property
+    def exhausted_by_wave(self) -> dict[int, int]:
+        with self._lock:
+            return dict(self._exhausted_by_wave)
+
+    def claim(self, wave_index: int | None = None) -> bool:
         if not self.enabled:
             return True
         with self._lock:
             if self._remaining <= 0:
+                self._record_exhausted(wave_index)
+                return False
+            if self._wave_aware(wave_index) and self._wave_allowance_locked(wave_index or 0) <= 0:
+                self._record_exhausted(wave_index)
                 return False
             self._remaining -= 1
+            self._claimed_total += 1
+            if wave_index:
+                self._claimed_by_wave[wave_index] = self._claimed_by_wave.get(wave_index, 0) + 1
             return True
+
+    def wave_remaining_allowance(self, wave_index: int | None) -> int:
+        if not self.enabled:
+            return self.limit
+        with self._lock:
+            if not self._wave_aware(wave_index):
+                return self._remaining
+            return self._wave_allowance_locked(wave_index or 0)
+
+    def metadata(self) -> dict:
+        with self._lock:
+            return {
+                "retry_budget_policy": self.policy,
+                "retry_budget_scope": "run",
+                "retry_budget_limit": self.limit,
+                "retry_budget_claimed_total": self._claimed_total,
+                "retry_budget_remaining": self._remaining,
+                "retry_budget_exhausted_count": self._exhausted_count,
+                "retry_budget_claimed_by_wave": {
+                    str(key): self._claimed_by_wave[key] for key in sorted(self._claimed_by_wave)
+                },
+                "retry_budget_exhausted_by_wave": {
+                    str(key): self._exhausted_by_wave[key] for key in sorted(self._exhausted_by_wave)
+                },
+            }
+
+    def _wave_aware(self, wave_index: int | None) -> bool:
+        return self.wave_count > 1 and bool(wave_index)
+
+    def _wave_allowance_locked(self, wave_index: int) -> int:
+        future_waves_remaining = max(0, self.wave_count - wave_index)
+        future_wave_reserve = min(future_waves_remaining, self._remaining)
+        return max(0, self._remaining - future_wave_reserve)
+
+    def _record_exhausted(self, wave_index: int | None) -> None:
+        self._exhausted_count += 1
+        if wave_index:
+            self._exhausted_by_wave[wave_index] = self._exhausted_by_wave.get(wave_index, 0) + 1
 
 
 def run_worker(
@@ -175,6 +246,7 @@ def _run_live_with_retry(
     backoff_schedule = _retry_backoff_schedule(env, max_retries)
     budget_limit = retry_budget.limit if retry_budget else _retry_budget_limit(env)
     budget_remaining = retry_budget.remaining if retry_budget else _retry_budget_remaining(env, budget_limit)
+    wave_index = _int_metadata(env.get("TLH_LIVE_WAVE_INDEX", "0")) or None
     budget_consumed = False
     sleep = retry_sleep or time.sleep
     jitter = retry_jitter or random.uniform
@@ -207,6 +279,7 @@ def _run_live_with_retry(
                 budget_consumed=budget_consumed,
                 retry_skipped_reason="",
             )
+            _attach_retry_budget_metadata(telemetry, retry_budget)
             return response, telemetry
 
         safe_error = _safe_error_message(response.error, env)
@@ -219,7 +292,7 @@ def _run_live_with_retry(
         delay_seconds = 0.0
         if can_retry:
             if not budget_consumed and retry_budget:
-                if retry_budget.claim():
+                if retry_budget.claim(wave_index=wave_index):
                     budget_consumed = True
                     budget_remaining = retry_budget.remaining
                 else:
@@ -271,8 +344,11 @@ def _run_live_with_retry(
                 budget_consumed=budget_consumed,
                 retry_skipped_reason=retry_skipped_reason,
             )
+        _attach_retry_budget_metadata(telemetry, retry_budget)
         return response, telemetry
-    return response, _telemetry_without_live_attempt(env, routing_decision, "stub", True, "unknown", "unknown")
+    telemetry = _telemetry_without_live_attempt(env, routing_decision, "stub", True, "unknown", "unknown")
+    _attach_retry_budget_metadata(telemetry, retry_budget)
+    return response, telemetry
 
 
 def classify_error(error: str) -> str:
@@ -723,8 +799,22 @@ def _backend_mode_from_env(env: Mapping[str, str]) -> str:
 def _int_metadata(raw: str) -> int:
     try:
         return int(raw)
-    except ValueError:
+    except (TypeError, ValueError):
         return 0
+
+
+def _float_metadata(raw: str) -> float:
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _json_metadata(raw: str):
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
 
 
 def _attach_key_pool_metadata(metadata: dict[str, int | str | bool | None], env: Mapping[str, str], backend: str) -> None:
@@ -773,6 +863,17 @@ def _attach_wave_metadata(metadata: dict, env: Mapping[str, str]) -> None:
         "TLH_LIVE_ACTUAL_CONCURRENCY_LIMITED",
         "true" if enabled else "false",
     ).strip().lower() in {"1", "true", "yes", "on"}
+    cooldown_seconds = _float_metadata(env.get("TLH_LIVE_WAVE_COOLDOWN_SECONDS", "0"))
+    metadata["wave_cooldown_enabled"] = cooldown_seconds > 0
+    metadata["wave_cooldown_seconds"] = cooldown_seconds
+    metadata["adaptive_pacing_enabled"] = cooldown_seconds > 0
+    metadata["adaptive_pacing_reason"] = env.get("TLH_LIVE_WAVE_ADAPTIVE_PACING_REASON", "")
+    metadata["cooldown_applied_between_waves"] = env.get(
+        "TLH_LIVE_WAVE_COOLDOWN_APPLIED",
+        "false",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    metadata["cooldown_total_seconds"] = _float_metadata(env.get("TLH_LIVE_WAVE_COOLDOWN_TOTAL_SECONDS", "0"))
+    metadata["cooldown_by_wave"] = _json_metadata(env.get("TLH_LIVE_WAVE_COOLDOWN_BY_WAVE", "{}"))
 
 
 def _telemetry_without_live_attempt(
@@ -803,6 +904,13 @@ def _telemetry_without_live_attempt(
         budget_consumed=False,
         retry_skipped_reason="",
     )
+
+
+def _attach_retry_budget_metadata(telemetry: dict, retry_budget: RetryBudget | None) -> None:
+    if retry_budget is None:
+        telemetry.setdefault("retry_budget_policy", "env_remaining")
+        return
+    telemetry.update(retry_budget.metadata())
 
 
 def _finish_live_telemetry(
@@ -852,8 +960,13 @@ def _finish_live_telemetry(
         "retry_budget_enabled": _retry_budget_enabled(env),
         "retry_budget_applied": _retry_budget_enabled(env),
         "retry_budget_scope": "run",
+        "retry_budget_policy": env.get("TLH_GEMMA_RETRY_BUDGET_POLICY", "run_scoped_first_come"),
         "retry_budget_limit": budget_limit,
         "retry_budget_remaining": budget_remaining,
+        "retry_budget_claimed_total": budget_limit - budget_remaining if budget_limit >= budget_remaining else 0,
+        "retry_budget_claimed_by_wave": {},
+        "retry_budget_exhausted_by_wave": {},
+        "retry_budget_exhausted_count": 1 if retry_skipped_reason == "retry budget exhausted" else 0,
         "retry_budget_consumed": budget_consumed,
         "retry_skipped_reason": retry_skipped_reason,
         "successful_workers_rerun": False,

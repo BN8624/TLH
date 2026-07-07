@@ -26,6 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     route_parser.add_argument("--workers", type=int, default=2)
     route_parser.add_argument("--live-limit", type=int)
     route_parser.add_argument("--live-wave-size", type=_positive_int)
+    route_parser.add_argument("--live-wave-cooldown-seconds", type=_non_negative_float)
     route_parser.add_argument("--mode", choices=["stub_only", "one_live", "limited_live", "full_live"])
     route_parser.add_argument("--force-backend", choices=["stub", "live"])
     route_parser.add_argument("--allow-full-live", action="store_true")
@@ -79,6 +80,8 @@ def _route_dry_run(args) -> int:
         env["TLH_LIVE_WORKER_LIMIT_SOURCE"] = "cli:--live-limit"
     if args.live_wave_size is not None:
         env["TLH_LIVE_WAVE_SIZE"] = str(args.live_wave_size)
+    if args.live_wave_cooldown_seconds is not None:
+        env["TLH_LIVE_WAVE_COOLDOWN_SECONDS"] = str(args.live_wave_cooldown_seconds)
     if args.force_backend:
         env["TLH_FORCE_WORKER_BACKEND"] = args.force_backend
     if args.allow_full_live:
@@ -90,6 +93,7 @@ def _route_dry_run(args) -> int:
     env["TLH_GEMMA_KEY_POOL_AVAILABLE_SLOTS"] = str(len(key_slots))
     simulation = simulate_routing_decisions(args.workers, env, requested="live")
     payload = simulation.to_dict()
+    payload = _attach_route_budget_pacing_policy(payload, env)
     payload["key_pool"] = _route_key_pool_summary(payload, key_slots)
     payload = _attach_route_wave_slots(payload, key_slots)
     if args.json:
@@ -103,6 +107,13 @@ def _positive_int(raw: str) -> int:
     value = int(raw)
     if value <= 0:
         raise argparse.ArgumentTypeError("must be greater than 0")
+    return value
+
+
+def _non_negative_float(raw: str) -> float:
+    value = float(raw)
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be greater than or equal to 0")
     return value
 
 
@@ -137,6 +148,11 @@ def _route_dry_run_text(payload: dict, force_backend: str | None) -> str:
         f"- max_concurrent_live_workers: {wave_policy.get('max_concurrent_live_workers', mix['live'])}",
         f"- target_live_workers: {wave_policy.get('target_live_workers', mix['live'])}",
         f"- successful_workers_rerun: {_yes_no(wave_policy.get('successful_workers_rerun', False))}",
+        f"- retry_budget_policy: {wave_policy.get('retry_budget_policy', 'run_scoped_first_come')}",
+        f"- retry_budget_limit: {wave_policy.get('retry_budget_limit', 5)}",
+        f"- retry_budget_scope: {wave_policy.get('retry_budget_scope', 'run')}",
+        f"- wave_cooldown_seconds: {wave_policy.get('wave_cooldown_seconds', 0)}",
+        f"- adaptive_pacing_enabled: {_yes_no(wave_policy.get('adaptive_pacing_enabled', False))}",
         "",
         "guards:",
         f"- force_live_bypasses_limit: {_yes_no(guards['force_live_bypassed_limit'])}",
@@ -185,6 +201,36 @@ def _route_key_pool_summary(payload: dict, key_slots: dict[int, str]) -> dict:
         if key_slot is not None:
             assigned.append(key_slot)
     return safe_key_pool_summary(len(key_slots), assigned)
+
+
+def _attach_route_budget_pacing_policy(payload: dict, env: dict[str, str]) -> dict:
+    wave_policy = payload.setdefault("wave_policy", {})
+    retry_budget_limit = _route_retry_budget_limit(env)
+    cooldown_seconds = _route_wave_cooldown_seconds(env)
+    wave_policy["retry_budget_policy"] = (
+        "wave_aware_reserve" if wave_policy.get("enabled") and wave_policy.get("wave_count", 0) > 1 else "run_scoped_first_come"
+    )
+    wave_policy["retry_budget_limit"] = retry_budget_limit
+    wave_policy["retry_budget_scope"] = "run"
+    wave_policy["wave_cooldown_enabled"] = cooldown_seconds > 0
+    wave_policy["wave_cooldown_seconds"] = cooldown_seconds
+    wave_policy["adaptive_pacing_enabled"] = cooldown_seconds > 0
+    wave_policy["adaptive_pacing_trigger"] = "api_429_rate_limit" if cooldown_seconds > 0 else "none"
+    return payload
+
+
+def _route_retry_budget_limit(env: dict[str, str]) -> int:
+    try:
+        return max(0, int(env.get("TLH_GEMMA_RETRY_BUDGET_WORKERS", "5")))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _route_wave_cooldown_seconds(env: dict[str, str]) -> float:
+    try:
+        return max(0.0, float(env.get("TLH_LIVE_WAVE_COOLDOWN_SECONDS", "0")))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _attach_route_wave_slots(payload: dict, key_slots: dict[int, str]) -> dict:
@@ -573,6 +619,11 @@ def _routing_lines(packet: dict) -> list[str]:
         f"per-wave worker counts: {wave.get('per_wave_worker_counts', {})}",
         f"per-wave live results: {wave.get('per_wave_live_results', {})}",
         f"per-wave fallback results: {wave.get('per_wave_fallback_results', {})}",
+        f"wave cooldown enabled: {wave.get('wave_cooldown_enabled', False)}",
+        f"wave cooldown seconds: {wave.get('wave_cooldown_seconds', 0)}",
+        f"adaptive pacing enabled: {wave.get('adaptive_pacing_enabled', False)}",
+        f"cooldown applied between waves: {wave.get('cooldown_applied_between_waves', False)}",
+        f"cooldown by wave: {wave.get('cooldown_by_wave', {})}",
         f"retry policy enabled: {retry.get('enabled', False)}",
         f"max retry attempts: {retry.get('max_retry_attempts', 0)}",
         f"retry backoff enabled: {retry.get('backoff_enabled', False)}",
@@ -581,6 +632,10 @@ def _routing_lines(packet: dict) -> list[str]:
         f"retry budget enabled: {retry.get('retry_budget_enabled', False)}",
         f"retry budget limit: {retry.get('retry_budget_limit', 0)}",
         f"retry budget scope: {retry.get('retry_budget_scope', 'run')}",
+        f"retry budget policy: {retry.get('retry_budget_policy', 'run_scoped_first_come')}",
+        f"retry budget claimed total: {retry.get('retry_budget_claimed_total', 0)}",
+        f"retry budget claimed by wave: {retry.get('retry_budget_claimed_by_wave', {})}",
+        f"retry budget exhausted by wave: {retry.get('retry_budget_exhausted_by_wave', {})}",
         f"retryable error count: {retry.get('retryable_error_count', 0)}",
         f"retried worker count: {retry.get('retried_worker_count', 0)}",
         f"retry success count: {retry.get('retry_success_count', 0)}",
