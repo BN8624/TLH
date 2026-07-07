@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from test_smoke_cli import run_tlh
 
 from tlh.live_routing import build_live_routing_policy, decide_worker_backend
@@ -42,6 +44,14 @@ def decisions(env: dict[str, str], count: int = 3) -> list:
             used += 1
         output.append(decision)
     return output
+
+
+def mix(output: list) -> dict[str, int]:
+    return {
+        "live": sum(1 for decision in output if decision.selected_backend == "live"),
+        "stub": sum(1 for decision in output if decision.selected_backend == "stub"),
+        "fallback": sum(1 for decision in output if decision.fallback_used),
+    }
 
 
 def test_default_policy_is_safe() -> None:
@@ -99,6 +109,73 @@ def test_force_backend_has_priority() -> None:
     assert [decision.selected_backend for decision in output] == ["stub", "stub", "stub"]
     assert all(decision.routing_source == "env:TLH_FORCE_WORKER_BACKEND" for decision in output)
     assert all("force backend" in decision.routing_reason for decision in output)
+
+
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    [
+        (3, {"live": 2, "stub": 1, "fallback": 0}),
+        (5, {"live": 2, "stub": 3, "fallback": 0}),
+        (11, {"live": 2, "stub": 9, "fallback": 0}),
+    ],
+)
+def test_limited_live_dry_run_worker_counts(count: int, expected: dict[str, int]) -> None:
+    output = decisions({"TLH_WORKER_BACKEND": "auto", "TLH_GEMMA_API_KEY": "SECRET_VALUE", "TLH_LIVE_WORKER_LIMIT": "2"}, count)
+
+    assert mix(output) == expected
+    assert sum(1 for decision in output if decision.routing_reason == "live worker limit reached") == expected["stub"]
+
+
+def test_one_live_dry_run_worker_count_eleven() -> None:
+    output = decisions({"TLH_WORKER_BACKEND": "auto", "TLH_LIVE_ROUTING_MODE": "one_live", "TLH_GEMMA_API_KEY": "SECRET_VALUE"}, 11)
+
+    assert mix(output) == {"live": 1, "stub": 10, "fallback": 0}
+
+
+def test_stub_only_dry_run_worker_count_eleven() -> None:
+    output = decisions({"TLH_WORKER_BACKEND": "live", "TLH_LIVE_ROUTING_MODE": "stub_only", "TLH_GEMMA_API_KEY": "SECRET_VALUE"}, 11)
+
+    assert mix(output) == {"live": 0, "stub": 11, "fallback": 0}
+
+
+def test_force_live_cannot_bypass_limited_live_guard() -> None:
+    output = decisions(
+        {
+            "TLH_WORKER_BACKEND": "stub",
+            "TLH_FORCE_WORKER_BACKEND": "live",
+            "TLH_LIVE_WORKER_LIMIT": "2",
+            "TLH_GEMMA_API_KEY": "SECRET_VALUE",
+        },
+        11,
+    )
+
+    assert mix(output) == {"live": 2, "stub": 9, "fallback": 0}
+    assert output[0].routing_reason == "force live requested, allowed within policy limit"
+    assert output[2].routing_reason == "force live requested, downgraded to stub by live limit"
+
+
+def test_force_live_cannot_imply_full_live() -> None:
+    output = decisions({"TLH_FORCE_WORKER_BACKEND": "live"}, 11)
+
+    assert mix(output) == {"live": 1, "stub": 10, "fallback": 0}
+    assert all(decision.policy_mode != "full_live" for decision in output)
+    assert output[1].routing_reason == "force live requested, downgraded to stub by live limit"
+
+
+def test_explicit_full_live_opt_in_path_is_documented_without_api_call() -> None:
+    output = decisions(
+        {
+            "TLH_WORKER_BACKEND": "auto",
+            "TLH_GEMMA_API_KEY": "SECRET_VALUE",
+            "TLH_LIVE_ROUTING_MODE": "full_live",
+            "TLH_ALLOW_FULL_LIVE": "1",
+        },
+        3,
+    )
+
+    assert mix(output) == {"live": 3, "stub": 0, "fallback": 0}
+    assert all(decision.policy_mode == "full_live" for decision in output)
+    assert all("TLH_ALLOW_FULL_LIVE" in decision.policy_source for decision in output)
 
 
 def test_worker_result_metadata_records_policy_decision() -> None:
@@ -161,6 +238,11 @@ def test_final_and_codex_prompt_include_policy_summary(tmp_path: Path) -> None:
     assert "## Routing Policy" in final_packet
     assert "policy mode: limited_live" in final_packet
     assert "max live workers: 2" in codex_prompt
+    assert "full_live explicit opt-in: False" in codex_prompt
+    assert "One stub-worker slice" not in final_packet
+    assert "stub-generated MVP skeleton" not in final_packet
+    assert "One stub-worker slice" not in codex_prompt
+    assert "stub-generated MVP skeleton" not in codex_prompt
 
 
 def run_tlh_with_env(cwd: Path, extra_env: dict[str, str], *args: str):

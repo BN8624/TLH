@@ -11,6 +11,7 @@ S-2 live Gemma adapter is implemented with stub-safe fallback.
 S-3 controlled one-live-worker run completed with PASS quality.
 S-4 controlled multi-live limit dry run completed with PASS quality.
 S-5 controlled live-worker routing policy is implemented with PASS-candidate tests.
+S-6 controlled routing policy dry run and guard hardening completed with PASS-candidate tests.
 
 The project direction is defined.
 AICO is deprecated and must not be used as the architecture base.
@@ -48,11 +49,12 @@ docs\TLH_IMPLEMENTATION_PROMPT.md
 
 ## Current Goal
 
-Prepare for controlled policy dry runs across larger worker counts.
+Prepare for a CLI-visible routing dry-run command or a policy-only scale simulation.
 
 S-3 proved that one TaskCard can run live with `gemma-4-31b-it` while the remaining TaskCard stays stub-safe.
 S-4 proved that two TaskCards can run live with `gemma-4-31b-it` while remaining TaskCards stay stub-safe under `TLH_LIVE_WORKER_LIMIT=2`.
 S-5 centralizes live/stub decisions in `tlh.live_routing` and records policy decisions in WorkerResult, MergePacket, FinalPacket, and CodexPrompt outputs.
+S-6 verifies worker counts 3, 5, and 11 without live API calls, hardens force-live so it cannot bypass live limits, and removes stale stub-only language from generated handoff outputs.
 
 The MVP currently proves the following flow with stub workers.
 
@@ -102,12 +104,15 @@ Run-level live worker limit with `TLH_LIVE_WORKER_LIMIT`.
 WorkerResult metadata for `live_worker_limit` and `live_worker_index`.
 Centralized `LiveRoutingPolicy` and `LiveRoutingDecision`.
 FinalPacket and CodexPrompt backend mix and routing policy summaries.
+Force-live guard that treats `TLH_FORCE_WORKER_BACKEND=live` as a live request subject to policy.
+Routing dry-run coverage for worker counts 3, 5, and 11.
 Fenced JSON live output normalization.
 Stub fallback for missing or failed live configuration.
 Mock live adapter tests.
 One-live-worker live dry run review.
 Multi-live limit dry run review.
 Controlled live-worker routing policy review.
+Controlled routing dry run and guard hardening review.
 ```
 
 Excluded.
@@ -153,10 +158,10 @@ No README is required for now because this is a solo project.
 
 ## Next Action
 
-Run controlled policy dry runs across larger worker counts without enabling default full_live.
+Add a CLI-visible routing dry-run command or run an S-7 policy-only scale simulation.
 
 ```text
-S-6 controlled routing policy dry run.
+S-7 routing policy dry-run command or policy-only scale simulation.
 ```
 
 ---
@@ -185,6 +190,7 @@ Do not duplicate AI_WORKFLOW_KIT global features.
 
 User approval is required before increasing the live worker count beyond two.
 `full_live` must not be enabled without explicit opt-in.
+`TLH_FORCE_WORKER_BACKEND=live` must not bypass live limits or imply full_live.
 
 Later decisions.
 
@@ -223,7 +229,7 @@ MinimalityCheck notes
 ## Recommended Next Slice
 
 ```text
-Run controlled policy dry runs across larger worker counts using the S-5 policy object.
+Add a user-visible routing dry-run command that reports decisions without invoking live workers.
 Keep API key values out of output, notes, logs, and commits.
 ```
 

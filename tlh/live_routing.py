@@ -135,7 +135,8 @@ def decide_worker_backend(
 ) -> LiveRoutingDecision:
     force_backend = env.get("TLH_FORCE_WORKER_BACKEND", "").strip().lower()
     fallback_allowed = policy.allow_fallback
-    if force_backend:
+    force_live_requested = force_backend == "live"
+    if force_backend and force_backend != "live":
         return _decision(
             worker_index=worker_index,
             requested=requested,
@@ -147,23 +148,26 @@ def decide_worker_backend(
             source="env:TLH_FORCE_WORKER_BACKEND",
         )
 
+    effective_requested = "live" if force_live_requested else requested
+
     if policy.mode == "stub_only":
+        reason = "force live rejected by stub_only policy" if force_live_requested else "stub_only policy selected"
         return _decision(
             worker_index=worker_index,
-            requested=requested,
+            requested=effective_requested,
             selected="stub",
             policy=policy,
             live_worker_index=None,
             fallback_allowed=fallback_allowed,
-            reason="stub_only policy selected",
-            source=policy.source,
+            reason=reason,
+            source="env:TLH_FORCE_WORKER_BACKEND+policy" if force_live_requested else policy.source,
         )
 
-    wants_live = _requests_live(requested, env)
+    wants_live = _requests_live(effective_requested, env)
     if not wants_live:
         return _decision(
             worker_index=worker_index,
-            requested=requested,
+            requested=effective_requested,
             selected="stub",
             policy=policy,
             live_worker_index=None,
@@ -173,26 +177,28 @@ def decide_worker_backend(
         )
 
     if live_workers_used >= policy.max_live_workers:
+        reason = "force live requested, downgraded to stub by live limit" if force_live_requested else "live worker limit reached"
         return _decision(
             worker_index=worker_index,
-            requested=requested,
+            requested=effective_requested,
             selected="stub",
             policy=policy,
             live_worker_index=None,
             fallback_allowed=fallback_allowed,
-            reason="live worker limit reached",
-            source="policy",
+            reason=reason,
+            source="env:TLH_FORCE_WORKER_BACKEND+policy" if force_live_requested else "policy",
         )
 
+    reason = "force live requested, allowed within policy limit" if force_live_requested else "within live worker limit"
     return _decision(
         worker_index=worker_index,
-        requested=requested,
+        requested=effective_requested,
         selected="live",
         policy=policy,
         live_worker_index=live_workers_used + 1,
         fallback_allowed=fallback_allowed,
-        reason="within live worker limit",
-        source=policy.source,
+        reason=reason,
+        source="env:TLH_FORCE_WORKER_BACKEND+policy" if force_live_requested else policy.source,
     )
 
 

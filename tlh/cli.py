@@ -177,7 +177,7 @@ def _finalize(root: Path, run_id: str) -> int:
         run_id=run_id,
         goal=state.get("concrete_mission", state["mission"]),
         current_state="Ready for Codex handoff after one slice-and-attach loop.",
-        confirmed_assumptions=["Worker outputs were stub-generated for MVP skeleton verification."],
+        confirmed_assumptions=["Worker outputs were selected by the live routing policy."],
         scope=sections["Scope"],
         out_of_scope=sections["OutOfScope"],
         execution_steps=sections["ImplementationSteps"],
@@ -311,7 +311,7 @@ def _final_packet_text(state: dict, packet: dict, sections: dict[str, list[str]]
             state.get("mission", "").strip(),
             "",
             "## Current State",
-            "One stub-worker slice attached successfully and produced an executable handoff draft.",
+            "A policy-routed worker mix attached successfully and produced an executable handoff draft.",
             "",
             "## Scope",
             markdown_list(sections["Scope"]),
@@ -404,4 +404,5 @@ def _policy_lines(packet: dict) -> list[str]:
         f"max live workers: {policy.get('max_live_workers', 'unknown')}",
         f"fallback allowed: {policy.get('fallback_allowed', 'unknown')}",
         f"policy source: {policy.get('source', 'unknown')}",
+        f"full_live explicit opt-in: {policy.get('full_live_explicit', False)}",
     ]

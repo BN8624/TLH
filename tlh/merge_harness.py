@@ -218,6 +218,10 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
             "max_live_workers": first_metadata.get("max_live_workers", first_metadata.get("live_worker_limit", 0)),
             "fallback_allowed": first_metadata.get("fallback_allowed", False),
             "source": first_metadata.get("policy_source", "unknown"),
+            "require_explicit_live": first_metadata.get("require_explicit_live", False),
+            "cost_guard_enabled": first_metadata.get("cost_guard_enabled", True),
+            "full_live_explicit": first_metadata.get("policy_mode") == "full_live"
+            and "TLH_ALLOW_FULL_LIVE" in str(first_metadata.get("policy_source", "")),
         },
         "fallback_used": any(result.fallback_used for result in results),
         "policy_routing_stub_count": policy_routing_stub_count,
@@ -233,6 +237,7 @@ def _routing_lines(routing: dict) -> list[str]:
         f"max live workers: {policy.get('max_live_workers', 'unknown')}",
         f"fallback allowed: {policy.get('fallback_allowed', 'unknown')}",
         f"policy source: {policy.get('source', 'unknown')}",
+        f"full_live explicit opt-in: {policy.get('full_live_explicit', False)}",
         f"live WorkerResults: {mix.get('live', 0)}",
         f"stub WorkerResults: {mix.get('stub', 0)}",
         f"policy routing stub count: {routing.get('policy_routing_stub_count', 0)}",

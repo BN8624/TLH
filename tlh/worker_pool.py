@@ -57,7 +57,7 @@ def run_worker(
         return _normalize_live_result(card, response, env, routing_decision)
 
     error = _redact_error(response.error, env)
-    fallback = _fallback_enabled(env, default=(mode == "auto"))
+    fallback = routing_decision.fallback_allowed if routing_decision else _fallback_enabled(env, default=(mode == "auto"))
     if fallback:
         return _stub_result(card, backend="stub", fallback_used=True, error=error, env=env, routing_decision=routing_decision)
     raise WorkerBackendError(error or "Live Gemma worker failed.")
