@@ -8,7 +8,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import dispatcher, graph_index, merge_harness, team_lead
+from . import dispatcher, gemma_client, graph_index, merge_harness, team_lead
 from .key_pool import assign_key_slot_for_live_worker, collect_gemini_key_slots, safe_key_pool_summary
 from .live_routing import simulate_routing_decisions
 from .loop_controller import decide
@@ -19,7 +19,10 @@ from .vault import init_project, note_meta, run_dir, state_path, vault_root, wri
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="tlh")
+    parser = argparse.ArgumentParser(
+        prog="tlh",
+        description=f"TLH CLI. Default live model: {gemma_client.DEFAULT_MODEL}. Override with TLH_GEMMA_MODEL.",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
     route_parser = sub.add_parser("route-dry-run")
@@ -49,6 +52,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "init":
         created = init_project(root)
         print(f"initialized TLH structure; created {len(created)} paths")
+        print(f"default live model: {gemma_client.DEFAULT_MODEL}")
+        print("model override: TLH_GEMMA_MODEL")
         return 0
     if args.command == "route-dry-run":
         return _route_dry_run(args)
@@ -93,6 +98,9 @@ def _route_dry_run(args) -> int:
     env["TLH_GEMMA_KEY_POOL_AVAILABLE_SLOTS"] = str(len(key_slots))
     simulation = simulate_routing_decisions(args.workers, env, requested="live")
     payload = simulation.to_dict()
+    live_model, model_source = gemma_client.model_from_env(env)
+    payload["live_model"] = live_model
+    payload["model_source"] = model_source
     payload = _attach_route_budget_pacing_policy(payload, env)
     payload["key_pool"] = _route_key_pool_summary(payload, key_slots)
     payload = _attach_route_wave_slots(payload, key_slots)
@@ -131,6 +139,8 @@ def _route_dry_run_text(payload: dict, force_backend: str | None) -> str:
         f"force_backend: {force_backend or 'none'}",
         f"full_live_enabled: {str(policy['full_live_enabled']).lower()}",
         f"allow_full_live: {str(policy['allow_full_live']).lower()}",
+        f"live_model: {payload.get('live_model', gemma_client.DEFAULT_MODEL)}",
+        f"model_source: {payload.get('model_source', 'default')}",
         "actual API call: NO",
         "run artifacts created: NO",
         "",

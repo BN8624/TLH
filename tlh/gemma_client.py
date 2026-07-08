@@ -10,7 +10,7 @@ from typing import Callable, Mapping
 from .schemas import TaskCard
 
 
-DEFAULT_MODEL = "gemma-3-27b-it"
+DEFAULT_MODEL = "gemma-4-31b-it"
 
 
 class GemmaUnavailable(RuntimeError):
@@ -44,6 +44,14 @@ def load_config(env: Mapping[str, str] | None = None) -> GemmaConfig:
         timeout_seconds=_float_env(env, "TLH_GEMMA_TIMEOUT_SECONDS", 60.0),
         max_output_tokens=_int_env(env, "TLH_GEMMA_MAX_OUTPUT_TOKENS", 4096),
     )
+
+
+def model_from_env(env: Mapping[str, str] | None = None) -> tuple[str, str]:
+    env = env or os.environ
+    raw = env.get("TLH_GEMMA_MODEL", "").strip()
+    if raw:
+        return raw, "env"
+    return DEFAULT_MODEL, "default"
 
 
 def is_configured(env: Mapping[str, str] | None = None) -> bool:

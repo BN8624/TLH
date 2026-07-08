@@ -23,7 +23,7 @@ Add live Gemma worker adapter while preserving stub-safe MVP flow.
 
 - `TLH_WORKER_BACKEND`: Selects `stub`, `auto`, or `live`.
 - `TLH_GEMMA_API_KEY`: Read from process environment only. Never stored in repo.
-- `TLH_GEMMA_MODEL`: Optional model name. Defaults to `gemma-3-27b-it`.
+- `TLH_GEMMA_MODEL`: Optional model name. Defaults to canonical `gemma-4-31b-it`.
 - `TLH_GEMMA_TIMEOUT_SECONDS`: Optional live call timeout. Defaults to `60`.
 - `TLH_GEMMA_MAX_OUTPUT_TOKENS`: Optional max output tokens. Defaults to `4096`.
 - `TLH_GEMMA_FALLBACK_TO_STUB`: Allows stub fallback after live failure when true.
