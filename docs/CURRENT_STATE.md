@@ -255,6 +255,7 @@ S-19 shows true concurrent wave-size 11 improves live-limit 22 behavior versus S
 S-20 shows true concurrent wave-size 8 enforces observed max concurrency 8 with three waves, but final live results dropped to 17 because retryable API failures in wave 3 could not be retried after the run-scoped retry budget was consumed; do not promote live-limit 22 or wave-size 8 to baseline.
 S-21 changes retry budget allocation to wave-aware reserve and adds optional adaptive wave cooldown, but it is mock/test validated only; do not infer live-limit 22 stability until a separate approved live trial runs.
 S-22 shows wave-aware reserve and cooldown-visible wave-size 8 did not stabilize live-limit 22; wave 3 starvation improved, but early waves had more retry-denied fallback and final live results dropped to 14. Do not promote live-limit 22, wave-size 8, or cooldown 30s to baseline.
+S-23 changes API key handling from fixed worker slots to a rotating health pool. Key count and live concurrency are now separated; live calls can select healthy key slots at attempt time; retry can rotate to another healthy key for retryable API pressure errors; API 429 cools down the key; API auth disables the key for the run; schema/invalid response does not poison key health; route-dry-run reports pooled key mode; FinalPacket/CodexPrompt summaries include key rotation metadata; key values are not recorded. S-23 was mock/test validated only and did not run live workers. The approved baseline remains live-limit 5 with timeout 300s.
 
 Later decisions.
 
@@ -293,7 +294,7 @@ MinimalityCheck notes
 ## Recommended Next Slice
 
 ```text
-Run another live-limit 22 true wave trial only with explicit approval and route-dry-run wave preflight. Prefer testing smaller wave sizes or targeted API-pressure controls before repeating wave-size 11.
+Run the next live validation only with explicit approval and route-dry-run preflight. Prefer validating live-limit 5 or a conservative wave run with the rotating health pool before returning to live-limit 22.
 Keep API key values out of output, notes, logs, and commits.
 ```
 

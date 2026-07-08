@@ -161,6 +161,11 @@ def _route_dry_run_text(payload: dict, force_backend: str | None) -> str:
         "",
         "key_pool:",
         f"- available key slots: {payload.get('key_pool', {}).get('available_key_slots', 0)}",
+        f"- key pool size: {payload.get('key_pool', {}).get('key_pool_size', payload.get('key_pool', {}).get('available_key_slots', 0))}",
+        f"- key pool mode: {payload.get('key_pool', {}).get('key_pool_mode', 'single_key')}",
+        f"- key selection policy: {payload.get('key_pool', {}).get('selection_policy', 'fixed_env_key')}",
+        f"- key slots are pooled: {_yes_no(payload.get('key_pool', {}).get('pooled', False))}",
+        f"- worker-to-key fixed 1:1 assignment: {_yes_no(payload.get('key_pool', {}).get('fixed_worker_assignment', True))}",
         f"- assigned key slots: {_slot_list(payload.get('key_pool', {}).get('assigned_key_slots', []))}",
         f"- distinct key slots used: {payload.get('key_pool', {}).get('distinct_key_slots_used', 0)}",
         f"- single-key mode: {_yes_no(payload.get('key_pool', {}).get('single_key_mode', True))}",
@@ -200,7 +205,20 @@ def _route_key_pool_summary(payload: dict, key_slots: dict[int, str]) -> dict:
         key_slot = assign_key_slot_for_live_worker(live_worker_index, key_slots)
         if key_slot is not None:
             assigned.append(key_slot)
-    return safe_key_pool_summary(len(key_slots), assigned)
+    summary = safe_key_pool_summary(len(key_slots), assigned)
+    summary.update(
+        {
+            "key_pool_size": len(key_slots),
+            "key_pool_mode": "rotating_health_pool" if key_slots else "single_key",
+            "selection_policy": "round_robin_health_aware" if key_slots else "fixed_env_key",
+            "key_rotation_enabled": bool(key_slots),
+            "key_cooldown_enabled": bool(key_slots),
+            "pooled": bool(key_slots),
+            "fixed_worker_assignment": False if key_slots else True,
+            "key_values_recorded": False,
+        }
+    )
+    return summary
 
 
 def _attach_route_budget_pacing_policy(payload: dict, env: dict[str, str]) -> dict:
@@ -604,6 +622,13 @@ def _routing_lines(packet: dict) -> list[str]:
         f"fallback stub count: {routing.get('fallback_stub_count', 0)}",
         f"fallback used: {routing.get('fallback_used', False)}",
         f"available key slots: {key_pool.get('available_key_slots', 0)}",
+        f"key pool mode: {key_pool.get('key_pool_mode', 'single_key')}",
+        f"key selection policy: {key_pool.get('key_selection_policy', 'fixed_env_key')}",
+        f"key rotation enabled: {key_pool.get('key_rotation_enabled', False)}",
+        f"key cooldown enabled: {key_pool.get('key_cooldown_enabled', False)}",
+        f"disabled key count: {key_pool.get('disabled_key_count', 0)}",
+        f"cooldown key count: {key_pool.get('cooldown_key_count', 0)}",
+        f"key values recorded: {key_pool.get('key_values_recorded', False)}",
         f"assigned key slots: {_slot_list(key_pool.get('assigned_key_slots', []))}",
         f"distinct key slots used: {key_pool.get('distinct_key_slots_used', 0)}",
         f"single-key mode: {key_pool.get('single_key_mode', True)}",

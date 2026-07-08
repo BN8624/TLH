@@ -204,6 +204,16 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
     first_metadata = results[0].metadata if results else {}
     assigned_key_slots: list[int] = []
     available_key_slots = 0
+    key_pool_mode = "single_key"
+    key_selection_policy = "fixed_env_key"
+    key_rotation_enabled = False
+    key_cooldown_enabled = False
+    key_values_recorded = False
+    disabled_key_count = 0
+    cooldown_key_count = 0
+    lease_count_by_slot: dict[str, int] = {}
+    error_count_by_slot: dict[str, int] = {}
+    total_key_rotations = 0
     retryable_error_count = 0
     retried_worker_count = 0
     retry_success_count = 0
@@ -242,6 +252,21 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
         backend_mix[result.backend] = backend_mix.get(result.backend, 0) + 1
         requested = result.metadata.get("requested_backend")
         available_key_slots = max(available_key_slots, _int_value(result.metadata.get("available_key_slots")))
+        key_pool_mode = str(result.metadata.get("key_pool_mode", key_pool_mode))
+        key_selection_policy = str(result.metadata.get("key_selection_policy", result.metadata.get("selection_policy", key_selection_policy)))
+        if result.metadata.get("key_rotation_enabled"):
+            key_rotation_enabled = True
+        if result.metadata.get("key_cooldown_enabled"):
+            key_cooldown_enabled = True
+        if result.metadata.get("key_values_recorded"):
+            key_values_recorded = True
+        disabled_key_count = max(disabled_key_count, _int_value(result.metadata.get("disabled_key_count")))
+        cooldown_key_count = max(cooldown_key_count, _int_value(result.metadata.get("cooldown_key_count")))
+        if isinstance(result.metadata.get("lease_count_by_slot"), dict):
+            lease_count_by_slot.update(result.metadata.get("lease_count_by_slot", {}))
+        if isinstance(result.metadata.get("error_count_by_slot"), dict):
+            error_count_by_slot.update(result.metadata.get("error_count_by_slot", {}))
+        total_key_rotations += _int_value(result.metadata.get("key_rotation_count"))
         key_slot = _int_value(result.metadata.get("key_slot"))
         if key_slot:
             assigned_key_slots.append(key_slot)
@@ -328,7 +353,20 @@ def _routing_summary(results: list[WorkerResult]) -> dict:
             "full_live_explicit": first_metadata.get("policy_mode") == "full_live"
             and "TLH_ALLOW_FULL_LIVE" in str(first_metadata.get("policy_source", "")),
         },
-        "key_pool": _key_pool_summary(available_key_slots, assigned_key_slots),
+        "key_pool": _key_pool_summary(
+            available_key_slots,
+            assigned_key_slots,
+            key_pool_mode=key_pool_mode,
+            key_selection_policy=key_selection_policy,
+            key_rotation_enabled=key_rotation_enabled,
+            key_cooldown_enabled=key_cooldown_enabled,
+            key_values_recorded=key_values_recorded,
+            disabled_key_count=disabled_key_count,
+            cooldown_key_count=cooldown_key_count,
+            lease_count_by_slot=lease_count_by_slot,
+            error_count_by_slot=error_count_by_slot,
+            total_key_rotations=total_key_rotations,
+        ),
         "retry_policy": {
             "enabled": max_retry_attempts > 0,
             "max_retry_attempts": max_retry_attempts,
@@ -399,6 +437,13 @@ def _routing_lines(routing: dict) -> list[str]:
         f"policy routing stub count: {routing.get('policy_routing_stub_count', 0)}",
         f"fallback stub count: {routing.get('fallback_stub_count', 0)}",
         f"available key slots: {routing.get('key_pool', {}).get('available_key_slots', 0)}",
+        f"key pool mode: {routing.get('key_pool', {}).get('key_pool_mode', 'single_key')}",
+        f"key selection policy: {routing.get('key_pool', {}).get('key_selection_policy', 'fixed_env_key')}",
+        f"key rotation enabled: {routing.get('key_pool', {}).get('key_rotation_enabled', False)}",
+        f"key cooldown enabled: {routing.get('key_pool', {}).get('key_cooldown_enabled', False)}",
+        f"disabled key count: {routing.get('key_pool', {}).get('disabled_key_count', 0)}",
+        f"cooldown key count: {routing.get('key_pool', {}).get('cooldown_key_count', 0)}",
+        f"key values recorded: {routing.get('key_pool', {}).get('key_values_recorded', False)}",
         f"assigned key slots: {_slot_list(routing.get('key_pool', {}).get('assigned_key_slots', []))}",
         f"distinct key slots used: {routing.get('key_pool', {}).get('distinct_key_slots_used', 0)}",
         f"single-key mode: {routing.get('key_pool', {}).get('single_key_mode', True)}",
@@ -442,10 +487,37 @@ def _routing_lines(routing: dict) -> list[str]:
     ]
 
 
-def _key_pool_summary(available_key_slots: int, assigned_key_slots: list[int]) -> dict:
+def _key_pool_summary(
+    available_key_slots: int,
+    assigned_key_slots: list[int],
+    *,
+    key_pool_mode: str = "single_key",
+    key_selection_policy: str = "fixed_env_key",
+    key_rotation_enabled: bool = False,
+    key_cooldown_enabled: bool = False,
+    key_values_recorded: bool = False,
+    disabled_key_count: int = 0,
+    cooldown_key_count: int = 0,
+    lease_count_by_slot: dict[str, int] | None = None,
+    error_count_by_slot: dict[str, int] | None = None,
+    total_key_rotations: int = 0,
+) -> dict:
     distinct = sorted(set(assigned_key_slots))
     return {
         "available_key_slots": available_key_slots,
+        "key_pool_size": available_key_slots,
+        "key_pool_mode": key_pool_mode,
+        "key_selection_policy": key_selection_policy,
+        "key_rotation_enabled": key_rotation_enabled,
+        "key_cooldown_enabled": key_cooldown_enabled,
+        "disabled_key_count": disabled_key_count,
+        "cooldown_key_count": cooldown_key_count,
+        "lease_count_by_slot": lease_count_by_slot or {},
+        "error_count_by_slot": error_count_by_slot or {},
+        "total_key_rotations": total_key_rotations,
+        "key_values_recorded": key_values_recorded,
+        "pooled": key_pool_mode == "rotating_health_pool",
+        "fixed_worker_assignment": key_pool_mode != "rotating_health_pool",
         "assigned_key_slots": distinct,
         "distinct_key_slots_used": len(distinct),
         "single_key_mode": available_key_slots <= 1,

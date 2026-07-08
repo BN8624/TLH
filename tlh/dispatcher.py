@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import time
 
-from .key_pool import assign_key_slot_for_live_worker, collect_gemini_key_slots
+from .key_pool import KeyHealthPool, assign_key_slot_for_live_worker, collect_gemini_key_slots
 from .live_routing import build_live_routing_policy, build_live_wave_plan, decide_worker_backend, live_wave_size, requested_backend
 from .packet_writer import frontmatter_note, markdown_list, write_jsonl, write_text
 from .schemas import TaskCard, WorkerResult, from_dict
@@ -20,6 +20,7 @@ def dispatch(root: Path, run_id: str, card_rows: list[dict]) -> list[WorkerResul
     results: list[WorkerResult] = []
     policy = build_live_routing_policy(os.environ)
     key_slots = collect_gemini_key_slots(os.environ, root / ".env")
+    key_health_pool = KeyHealthPool(key_slots) if key_slots else None
     live_count = 0
     retry_budget_limit = _retry_budget_limit(os.environ)
     planned = []
@@ -41,9 +42,8 @@ def dispatch(root: Path, run_id: str, card_rows: list[dict]) -> list[WorkerResul
             live_count += 1
             key_slot = assign_key_slot_for_live_worker(live_count, key_slots)
             if key_slot is not None:
-                card_env["TLH_GEMMA_API_KEY"] = key_slots[key_slot]
-                card_env["TLH_GEMMA_KEY_SLOT"] = str(key_slot)
-                card_env["TLH_GEMMA_KEY_POOL_MODE"] = "pooled"
+                card_env["TLH_GEMMA_KEY_POOL_MODE"] = "rotating_health_pool"
+                card_env["TLH_GEMMA_KEY_SELECTION_POLICY"] = "round_robin_health_aware"
                 key_slots_by_worker[worker_index] = key_slot
             else:
                 card_env["TLH_GEMMA_KEY_POOL_MODE"] = "single_key" if card_env.get("TLH_GEMMA_API_KEY") else "unavailable"
@@ -57,6 +57,7 @@ def dispatch(root: Path, run_id: str, card_rows: list[dict]) -> list[WorkerResul
         wave_plan,
         wave_by_worker,
         retry_budget,
+        key_health_pool,
         cooldown_seconds=_wave_cooldown_seconds(os.environ),
     )
     write_jsonl(root / "machine" / "runs" / run_id / "worker_results.jsonl", [result.to_dict() for result in results])
@@ -102,6 +103,7 @@ def _execute_planned_workers(
     wave_plan,
     wave_by_worker: dict[int, int],
     retry_budget: RetryBudget,
+    key_health_pool: KeyHealthPool | None,
     cooldown_seconds: float = 0.0,
     wave_sleep=None,
 ) -> list[WorkerResult]:
@@ -109,14 +111,14 @@ def _execute_planned_workers(
     cooldown_by_wave: dict[int, float] = {}
     if not wave_plan.enabled:
         for item in sorted(planned, key=lambda planned_item: planned_item[0]):
-            worker_index, result = _run_planned_worker(item, wave_plan, wave_by_worker, retry_budget)
+            worker_index, result = _run_planned_worker(item, wave_plan, wave_by_worker, retry_budget, key_health_pool)
             results_by_worker[worker_index] = result
         _attach_run_policy_metadata(results_by_worker.values(), retry_budget, cooldown_seconds, cooldown_by_wave)
         return [results_by_worker[item[0]] for item in sorted(planned, key=lambda planned_item: planned_item[0])]
 
     no_wave_items = [item for item in planned if item[0] not in wave_by_worker]
     for item in sorted(no_wave_items, key=lambda planned_item: planned_item[0]):
-        worker_index, result = _run_planned_worker(item, wave_plan, wave_by_worker, retry_budget)
+        worker_index, result = _run_planned_worker(item, wave_plan, wave_by_worker, retry_budget, key_health_pool)
         results_by_worker[worker_index] = result
 
     planned_by_worker = {item[0]: item for item in planned}
@@ -130,6 +132,8 @@ def _execute_planned_workers(
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(_run_planned_worker, item, wave_plan, wave_by_worker, retry_budget)
+                if key_health_pool is None
+                else executor.submit(_run_planned_worker, item, wave_plan, wave_by_worker, retry_budget, key_health_pool)
                 for item in wave_items
             ]
             for future in futures:
@@ -144,7 +148,13 @@ def _execute_planned_workers(
     return [results_by_worker[item[0]] for item in sorted(planned, key=lambda planned_item: planned_item[0])]
 
 
-def _run_planned_worker(item, wave_plan, wave_by_worker: dict[int, int], retry_budget: RetryBudget) -> tuple[int, WorkerResult]:
+def _run_planned_worker(
+    item,
+    wave_plan,
+    wave_by_worker: dict[int, int],
+    retry_budget: RetryBudget,
+    key_health_pool: KeyHealthPool | None = None,
+) -> tuple[int, WorkerResult]:
     worker_index, card, card_env, decision = item
     card_env["TLH_GEMMA_RETRY_BUDGET_REMAINING"] = str(retry_budget.remaining)
     card_env["TLH_GEMMA_RETRY_BUDGET_POLICY"] = retry_budget.policy
@@ -152,11 +162,20 @@ def _run_planned_worker(item, wave_plan, wave_by_worker: dict[int, int], retry_b
     wave_index = int(card_env.get("TLH_LIVE_WAVE_INDEX", "0") or "0")
     card_env["TLH_GEMMA_RETRY_BUDGET_WAVE_ALLOWANCE"] = str(retry_budget.wave_remaining_allowance(wave_index))
     try:
-        result = run_worker(card, env=card_env, routing_decision=decision, retry_budget=retry_budget)
+        result = run_worker(
+            card,
+            env=card_env,
+            routing_decision=decision,
+            retry_budget=retry_budget,
+            key_health_pool=key_health_pool,
+        )
     except TypeError as exc:
-        if "retry_budget" not in str(exc):
+        if "key_health_pool" in str(exc):
+            result = run_worker(card, env=card_env, routing_decision=decision, retry_budget=retry_budget)
+        elif "retry_budget" in str(exc):
+            result = run_worker(card, env=card_env, routing_decision=decision)
+        else:
             raise
-        result = run_worker(card, env=card_env, routing_decision=decision)
     return worker_index, result
 
 

@@ -145,7 +145,7 @@ def test_live_worker_limit_does_not_mutate_process_env(monkeypatch, tmp_path: Pa
     assert os.environ.get("TLH_LIVE_WORKER_INDEX") is None
 
 
-def test_dispatch_assigns_distinct_key_slots_to_live_workers(monkeypatch, tmp_path: Path) -> None:
+def test_dispatch_uses_rotating_key_health_pool_for_live_workers(monkeypatch, tmp_path: Path) -> None:
     init_project(tmp_path)
     (tmp_path / ".env").write_text(
         "\n".join(f"GOOGLE_API_KEY_{slot}=SECRET_{slot}" for slot in range(1, 23)),
@@ -160,14 +160,20 @@ def test_dispatch_assigns_distinct_key_slots_to_live_workers(monkeypatch, tmp_pa
         task_card: TaskCard,
         env: dict[str, str] | None = None,
         routing_decision: LiveRoutingDecision | None = None,
+        retry_budget=None,
+        key_health_pool=None,
     ) -> WorkerResult:
+        del retry_budget
         assert env is not None
         assert routing_decision is not None
         backend = routing_decision.selected_backend
-        key_slot = env.get("TLH_GEMMA_KEY_SLOT")
+        key_slot = None
         if backend == "live":
-            assert key_slot is not None
-            assert env["TLH_GEMMA_API_KEY"] == f"SECRET_{key_slot}"
+            assert key_health_pool is not None
+            assert "TLH_GEMMA_API_KEY" not in env
+            lease = key_health_pool.select_key(worker_index=routing_decision.worker_index)
+            assert lease is not None
+            key_slot = lease.key_slot
         return WorkerResult(
             task_id=task_card.task_id,
             worker_id=f"{backend}-{task_card.worker_role}",

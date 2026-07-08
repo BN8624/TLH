@@ -10,6 +10,7 @@ import time
 from typing import Callable, Mapping
 
 from . import gemma_client
+from .key_pool import KeyHealthPool
 from .live_routing import LiveRoutingDecision
 from .schemas import TaskCard, WorkerResult
 
@@ -128,10 +129,11 @@ def run_worker(
     retry_sleep: RetrySleep | None = None,
     retry_jitter: RetryJitter | None = None,
     retry_budget: RetryBudget | None = None,
+    key_health_pool: KeyHealthPool | None = None,
 ) -> WorkerResult:
     env = env or os.environ
     mode = routing_decision.selected_backend if routing_decision else _backend_mode(card, env)
-    if live_generate is None:
+    if live_generate is None and key_health_pool is None:
         live_generate = _generate_with_env(env)
 
     if mode == "stub":
@@ -185,6 +187,7 @@ def run_worker(
         retry_sleep=retry_sleep,
         retry_jitter=retry_jitter,
         retry_budget=retry_budget,
+        key_health_pool=key_health_pool,
     )
     if response.success:
         return _normalize_live_result(card, response, env, routing_decision, telemetry=telemetry)
@@ -236,10 +239,11 @@ def _run_live_with_retry(
     prompt: str,
     env: Mapping[str, str],
     routing_decision: LiveRoutingDecision | None,
-    live_generate: GemmaGenerate,
+    live_generate: GemmaGenerate | None,
     retry_sleep: RetrySleep | None = None,
     retry_jitter: RetryJitter | None = None,
     retry_budget: RetryBudget | None = None,
+    key_health_pool: KeyHealthPool | None = None,
 ) -> tuple[gemma_client.GemmaResponse, dict]:
     started = time.monotonic()
     max_retries = _max_retry_attempts(env)
@@ -251,17 +255,72 @@ def _run_live_with_retry(
     sleep = retry_sleep or time.sleep
     jitter = retry_jitter or random.uniform
     attempts: list[dict] = []
+    attempt_key_slots: list[int] = []
     first_error_type = "none"
     last_error_type = "none"
+    previous_error_type = ""
+    key_rotation_reason = ""
+    key_cooldown_applied = False
+    key_disabled_for_run = False
     response = gemma_client.GemmaResponse(success=False, error="unknown live worker failure")
     for attempt_index in range(max_retries + 1):
+        attempt_env = dict(env)
+        lease = None
+        if key_health_pool is not None:
+            avoid_slots = set(attempt_key_slots) if previous_error_type in RETRYABLE_ERROR_TYPES | {"api_auth_error"} else set()
+            lease = key_health_pool.select_key(
+                worker_index=routing_decision.worker_index if routing_decision else None,
+                attempt_index=attempt_index + 1,
+                avoid_slots=avoid_slots,
+                error_context=previous_error_type or None,
+            )
+            if lease is None:
+                telemetry = _finish_live_telemetry(
+                    env=attempt_env,
+                    routing_decision=routing_decision,
+                    started=started,
+                    attempts=attempts,
+                    final_backend="stub",
+                    fallback_used=True,
+                    fallback_cause="api_auth_error",
+                    first_error_type=first_error_type if first_error_type != "none" else "api_auth_error",
+                    last_error_type="api_auth_error",
+                    final_error_type="api_auth_error",
+                    error_message="No healthy Gemini key slot is available.",
+                    max_retries=max_retries,
+                    backoff_schedule=backoff_schedule,
+                    budget_limit=budget_limit,
+                    budget_remaining=retry_budget.remaining if retry_budget else budget_remaining,
+                    budget_consumed=budget_consumed,
+                    retry_skipped_reason="no healthy key available",
+                )
+                _attach_key_rotation_metadata(
+                    telemetry,
+                    attempts,
+                    key_health_pool,
+                    key_rotation_reason,
+                    key_cooldown_applied,
+                    key_disabled_for_run,
+                )
+                _attach_retry_budget_metadata(telemetry, retry_budget)
+                return response, telemetry
+            attempt_env["TLH_GEMMA_API_KEY"] = lease.key_value
+            attempt_env["TLH_GEMMA_KEY_SLOT"] = str(lease.key_slot)
+            attempt_env["TLH_GEMMA_KEY_POOL_MODE"] = "rotating_health_pool"
+            attempt_env["TLH_GEMMA_KEY_SELECTION_REASON"] = lease.selection_reason
+            attempt_key_slots.append(lease.key_slot)
+        elif _int_metadata(attempt_env.get("TLH_GEMMA_KEY_SLOT", "0")):
+            attempt_key_slots.append(_int_metadata(attempt_env.get("TLH_GEMMA_KEY_SLOT", "0")) or 0)
         attempt_started = time.monotonic()
-        response = live_generate(prompt)
+        generator = live_generate or _generate_with_env(attempt_env)
+        response = generator(prompt)
         attempt_latency_ms = _latency_ms(attempt_started, time.monotonic())
         if response.success:
-            attempts.append(_attempt_metadata(attempt_index + 1, True, attempt_latency_ms, env, "none", ""))
+            if key_health_pool is not None and lease is not None:
+                key_health_pool.record_success(lease.key_slot)
+            attempts.append(_attempt_metadata(attempt_index + 1, True, attempt_latency_ms, attempt_env, "none", ""))
             telemetry = _finish_live_telemetry(
-                env=env,
+                env=attempt_env,
                 routing_decision=routing_decision,
                 started=started,
                 attempts=attempts,
@@ -279,11 +338,25 @@ def _run_live_with_retry(
                 budget_consumed=budget_consumed,
                 retry_skipped_reason="",
             )
+            _attach_key_rotation_metadata(
+                telemetry,
+                attempts,
+                key_health_pool,
+                key_rotation_reason,
+                key_cooldown_applied,
+                key_disabled_for_run,
+            )
             _attach_retry_budget_metadata(telemetry, retry_budget)
             return response, telemetry
 
-        safe_error = _safe_error_message(response.error, env)
+        safe_error = _safe_error_message(response.error, attempt_env)
         error_type = classify_error(safe_error)
+        if key_health_pool is not None and lease is not None:
+            key_health_pool.record_failure(lease.key_slot, error_type)
+            if error_type in RETRYABLE_ERROR_TYPES:
+                key_cooldown_applied = True
+            if error_type == "api_auth_error":
+                key_disabled_for_run = True
         if first_error_type == "none":
             first_error_type = error_type
         last_error_type = error_type
@@ -315,18 +388,21 @@ def _run_live_with_retry(
                 attempt_index + 1,
                 False,
                 attempt_latency_ms,
-                env,
+                attempt_env,
                 error_type,
                 safe_error,
                 scheduled_retry_delay_seconds=delay_seconds if can_retry else 0.0,
             )
         )
         if can_retry:
+            if key_health_pool is not None and error_type in RETRYABLE_ERROR_TYPES and not key_rotation_reason:
+                key_rotation_reason = error_type
+            previous_error_type = error_type
             if delay_seconds > 0:
                 sleep(delay_seconds)
             continue
         telemetry = _finish_live_telemetry(
-            env=env,
+            env=attempt_env,
             routing_decision=routing_decision,
             started=started,
             attempts=attempts,
@@ -344,9 +420,18 @@ def _run_live_with_retry(
                 budget_consumed=budget_consumed,
                 retry_skipped_reason=retry_skipped_reason,
             )
+        _attach_key_rotation_metadata(
+            telemetry,
+            attempts,
+            key_health_pool,
+            key_rotation_reason or error_type,
+            key_cooldown_applied,
+            key_disabled_for_run,
+        )
         _attach_retry_budget_metadata(telemetry, retry_budget)
         return response, telemetry
     telemetry = _telemetry_without_live_attempt(env, routing_decision, "stub", True, "unknown", "unknown")
+    _attach_key_rotation_metadata(telemetry, attempts, key_health_pool, key_rotation_reason, key_cooldown_applied, key_disabled_for_run)
     _attach_retry_budget_metadata(telemetry, retry_budget)
     return response, telemetry
 
@@ -911,6 +996,45 @@ def _attach_retry_budget_metadata(telemetry: dict, retry_budget: RetryBudget | N
         telemetry.setdefault("retry_budget_policy", "env_remaining")
         return
     telemetry.update(retry_budget.metadata())
+
+
+def _attach_key_rotation_metadata(
+    telemetry: dict,
+    attempts: list[dict],
+    key_health_pool: KeyHealthPool | None,
+    key_rotation_reason: str,
+    key_cooldown_applied: bool,
+    key_disabled_for_run: bool,
+) -> None:
+    attempt_key_slots = [
+        int(attempt["key_slot"])
+        for attempt in attempts
+        if isinstance(attempt.get("key_slot"), int) and attempt.get("key_slot")
+    ]
+    if attempt_key_slots:
+        telemetry["initial_key_slot"] = attempt_key_slots[0]
+        telemetry["attempt_key_slots"] = attempt_key_slots
+        telemetry["final_key_slot"] = attempt_key_slots[-1]
+        telemetry["key_rotation_count"] = max(0, len(set(attempt_key_slots)) - 1)
+        telemetry["key_rotation_reason"] = key_rotation_reason or "none"
+        telemetry["key_slot"] = attempt_key_slots[-1]
+        telemetry["key_slot_preserved"] = len(set(attempt_key_slots)) <= 1
+    else:
+        telemetry.setdefault("initial_key_slot", None)
+        telemetry.setdefault("attempt_key_slots", [])
+        telemetry.setdefault("final_key_slot", None)
+        telemetry.setdefault("key_rotation_count", 0)
+        telemetry.setdefault("key_rotation_reason", key_rotation_reason or "none")
+    telemetry["key_cooldown_applied"] = key_cooldown_applied
+    telemetry["key_disabled_for_run"] = key_disabled_for_run
+    telemetry["key_values_recorded"] = False
+    if key_health_pool is None:
+        telemetry.setdefault("key_pool_mode", "single_key")
+        telemetry.setdefault("key_selection_policy", "fixed_env_key")
+        telemetry.setdefault("key_rotation_enabled", False)
+        telemetry.setdefault("key_cooldown_enabled", False)
+        return
+    telemetry.update(key_health_pool.snapshot_summary())
 
 
 def _finish_live_telemetry(
