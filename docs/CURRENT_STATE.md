@@ -256,6 +256,7 @@ S-20 shows true concurrent wave-size 8 enforces observed max concurrency 8 with 
 S-21 changes retry budget allocation to wave-aware reserve and adds optional adaptive wave cooldown, but it is mock/test validated only; do not infer live-limit 22 stability until a separate approved live trial runs.
 S-22 shows wave-aware reserve and cooldown-visible wave-size 8 did not stabilize live-limit 22; wave 3 starvation improved, but early waves had more retry-denied fallback and final live results dropped to 14. Do not promote live-limit 22, wave-size 8, or cooldown 30s to baseline.
 S-23 changes API key handling from fixed worker slots to a rotating health pool. Key count and live concurrency are now separated; live calls can select healthy key slots at attempt time; retry can rotate to another healthy key for retryable API pressure errors; API 429 cools down the key; API auth disables the key for the run; schema/invalid response does not poison key health; route-dry-run reports pooled key mode; FinalPacket/CodexPrompt summaries include key rotation metadata; key values are not recorded. S-23 was mock/test validated only and did not run live workers. The approved baseline remains live-limit 5 with timeout 300s.
+S-24 validates the rotating health pool with approved live-limit 5 and worker_count 22. Preflight predicted live 5 / stub 17 / fallback 0. The first live attempt used the outdated default model and fell back with model-not-found errors. The rerun with `TLH_GEMMA_MODEL=gemma-4-31b-it` completed live 5 / stub 17 / fallback 0; all stubs were policy-routed; key pool metadata reported `rotating_health_pool`, `fixed_worker_assignment=false`, and no key values recorded. No 429/500/503 occurred, so live retry rotation was not observed in S-24; it remains covered by S-23 mock tests. The approved baseline remains live-limit 5 with timeout 300s.
 
 Later decisions.
 
@@ -294,7 +295,7 @@ MinimalityCheck notes
 ## Recommended Next Slice
 
 ```text
-Run the next live validation only with explicit approval and route-dry-run preflight. Prefer validating live-limit 5 or a conservative wave run with the rotating health pool before returning to live-limit 22.
+Run the next live validation only with explicit approval and route-dry-run preflight. To observe live retry rotation, use a controlled run that naturally encounters retryable API pressure or add a dedicated safe fault-injection harness; do not force higher live concurrency just to induce errors.
 Keep API key values out of output, notes, logs, and commits.
 ```
 
